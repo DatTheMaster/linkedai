@@ -19,6 +19,7 @@ import {
   getFitReport, setFitReport,
   pushNotification, popNotifications,
   getInterestPolicy, setInterestPolicy,
+  verifyIntroToken,
   getHandler,
   kv,
 } from "../kv";
@@ -84,7 +85,7 @@ const offerKeywords = [
 
 // ─── FitReport scoring (deterministic, no LLM) ────────────────────────────
 
-const scoreFit = (agent: Agent, project: Project): FitReport & { id: string } => {
+const scoreFit = (agent: Agent, project: Project, interests?: InterestPolicy | null): FitReport & { id: string } => {
   const agentStack = (agent.stack || []).map(s => s.toLowerCase());
   const projectStack = project.stack.map(s => s.toLowerCase());
   const agentOffers = (agent.collaboration_offers || []).map(s => s.toLowerCase());
@@ -109,7 +110,21 @@ const scoreFit = (agent: Agent, project: Project): FitReport & { id: string } =>
   const stageDiff = Math.abs(agentStage - projectStageIdx);
   const stageScore = stageDiff === 0 ? 20 : stageDiff === 1 ? 15 : stageDiff === 2 ? 8 : 0;
 
-  const score = stackScore + seekScore + stageScore;
+  // Interests boost (0–10): if agent has interest policy matching this project's category/stage, reward it
+  let interestsBoost = 0;
+  if (interests) {
+    const catMatch = interests.categories.length > 0 &&
+      interests.categories.some(c => project.category.toLowerCase().includes(c.toLowerCase()));
+    const stageMatch = interests.stages.length > 0 &&
+      interests.stages.some(s => s.toLowerCase() === (project.stage || "").toLowerCase());
+    const stackMatch = interests.stacks.length > 0 &&
+      interests.stacks.some(s => projectStack.some(ps => ps.includes(s.toLowerCase()) || s.toLowerCase().includes(ps)));
+    if (catMatch) interestsBoost += 4;
+    if (stageMatch) interestsBoost += 3;
+    if (stackMatch) interestsBoost += 3;
+  }
+
+  const score = Math.min(100, stackScore + seekScore + stageScore + interestsBoost);
 
   const recommendation: FitReport["recommendation"] =
     score >= 70 ? "strong_match" :
@@ -353,7 +368,8 @@ export const handleAgentPost = async (
     const project = await getProject(env, projectId);
     if (!project) return json({ error: "Project not found" }, 404);
 
-    const report = scoreFit(authAgent, project);
+    const interests = await getInterestPolicy(env, authAgent.id);
+    const report = scoreFit(authAgent, project, interests);
     await setFitReport(env, report);
 
     // Notify the agent's handler
@@ -611,5 +627,29 @@ export const handleAgentDigest = async (request: Request, env: Env, url: URL): P
     notifications: filtered,
     pending_connections: pending,
     next_since: new Date().toISOString(),
+  });
+};
+
+// ─── Handler: GET /api/agent/verify_intro ─────────────────────────────────
+
+export const handleVerifyIntro = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const token = url.searchParams.get("token");
+  if (!token) return json({ error: "Missing token" }, 400);
+  const intro = await verifyIntroToken(env, token);
+  if (!intro) return json({ valid: false, error: "Token invalid or expired" }, 401);
+  // Return public identity info for the counterpart agent
+  const withAgent = await getAgent(env, intro.with_agent_id);
+  return json({
+    valid: true,
+    connection_id: intro.connection_id,
+    agent_id: intro.agent_id,
+    with_agent: withAgent ? {
+      id: withAgent.id,
+      name: withAgent.name,
+      handle: withAgent.handle,
+      headline: withAgent.headline,
+      model: withAgent.model,
+    } : null,
+    expires_at: intro.expires_at,
   });
 };

@@ -342,6 +342,20 @@ export const pushNotification = async (env: Env, agentId: string, notif: Notific
   queue.push(notif);
   if (queue.length > NOTIF_MAX) queue = queue.slice(-NOTIF_MAX);
   await kv.put(env, k, JSON.stringify(queue));
+
+  // Best-effort webhook push: if agent has a delivery webhook configured, POST the notification
+  const agentData = await kv.get(env, `agent:${agentId}`);
+  if (agentData) {
+    const agent = JSON.parse(agentData) as Agent;
+    const webhookUrl = agent.handler_webhook;
+    if (webhookUrl) {
+      fetch(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-LinkedAI-Event": notif.type },
+        body: JSON.stringify({ agent_id: agentId, notification: notif }),
+      }).catch(() => { /* fire-and-forget — digest poll is the fallback */ });
+    }
+  }
 };
 
 export const popNotifications = async (env: Env, agentId: string): Promise<Notification[]> => {
@@ -350,6 +364,39 @@ export const popNotifications = async (env: Env, agentId: string): Promise<Notif
   const queue: Notification[] = JSON.parse(raw);
   await kv.put(env, k, "[]");   // consumed on read
   return queue;
+};
+
+// ─── Introduction Tokens (short-lived, proves agent identity on connect) ─────
+
+export interface IntroToken {
+  token: string;
+  connection_id: string;
+  agent_id: string;
+  with_agent_id: string;
+  expires_at: string;
+}
+
+export const createIntroToken = async (
+  env: Env,
+  connectionId: string,
+  agentId: string,
+  withAgentId: string,
+): Promise<IntroToken> => {
+  const token = Array.from(crypto.getRandomValues(new Uint8Array(20)))
+    .map(b => b.toString(16).padStart(2, "0")).join("");
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min TTL
+  const intro: IntroToken = { token, connection_id: connectionId, agent_id: agentId, with_agent_id: withAgentId, expires_at: expiresAt };
+  if (!env.KV) return intro;
+  await env.KV.put(`intro_token:${token}`, JSON.stringify(intro), { expirationTtl: 600 });
+  return intro;
+};
+
+export const verifyIntroToken = async (env: Env, token: string): Promise<IntroToken | null> => {
+  const d = await kv.get(env, `intro_token:${token}`);
+  if (!d) return null;
+  const intro = JSON.parse(d) as IntroToken;
+  if (new Date(intro.expires_at) < new Date()) return null;
+  return intro;
 };
 
 // ─── Interest Policy ────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@
 import type { Env } from "./types";
 import { json } from "./render";
 import { handleGet } from "./routes/public";
-import { handleAgentPost, handleAgentDigest } from "./routes/agent";
+import { handleAgentPost, handleAgentDigest, handleVerifyIntro } from "./routes/agent";
 import { handleHandlerApi } from "./routes/handler";
 import { handleForumApi } from "./routes/forum";
 import { handleChat } from "./routes/chat";
@@ -31,6 +31,11 @@ export default {
     // ── Agent digest (GET, authenticated) ───────────────────────────────
     if (path === "/api/agent/digest" && method === "GET") {
       return handleAgentDigest(request, env, url);
+    }
+
+    // ── Intro token verification (GET, public) ───────────────────────────
+    if (path === "/api/agent/verify_intro" && method === "GET") {
+      return handleVerifyIntro(request, env, url);
     }
 
     // ── Handler API (POST + GET) ─────────────────────────────────────────

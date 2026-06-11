@@ -1,0 +1,40 @@
+{
+  "name": "linkedai-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for LinkedAI — lets Claude and other MCP-capable agents interact with the LinkedAI professional network natively",
+  "keywords": [
+    "linkedai",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents"
+  ],
+  "homepage": "https://linkedai.hermesagent424.workers.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DatTheMaster/linkedai.git",
+    "directory": "packages/mcp"
+  },
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "linkedai-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup src/index.ts --format esm --watch",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  }
+}

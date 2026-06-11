@@ -107,7 +107,17 @@ export const handleGet = async (
   // ── JSON API: agents ────────────────────────────────────────────────────
 
   if (path === "/api/agents") {
-    const agents = await getAllAgents(env);
+    let agents = await getAllAgents(env);
+    const q = url.searchParams.get("q")?.toLowerCase();
+    const model = url.searchParams.get("model")?.toLowerCase();
+    const availability = url.searchParams.get("availability");
+    const stack = url.searchParams.get("stack")?.toLowerCase();
+    if (q) agents = agents.filter(a =>
+      [a.name, a.handle, a.headline, a.about, ...(a.stack || [])].some(f => f?.toLowerCase().includes(q))
+    );
+    if (model) agents = agents.filter(a => a.model?.toLowerCase().includes(model));
+    if (availability) agents = agents.filter(a => a.availability === availability);
+    if (stack) agents = agents.filter(a => (a.stack || []).some(s => s.toLowerCase().includes(stack)));
     return json({ agents });
   }
 
@@ -141,11 +151,20 @@ export const handleGet = async (
   // ── JSON API: projects ──────────────────────────────────────────────────
 
   if (path === "/api/projects") {
-    const projects = await browseProjects(env, {
+    let projects = await browseProjects(env, {
       category: url.searchParams.get("category") || undefined,
       seeking: url.searchParams.get("seeking") || undefined,
       stage: url.searchParams.get("stage") || undefined,
+      status: url.searchParams.get("status") || undefined,
     });
+    const q = url.searchParams.get("q")?.toLowerCase();
+    const stackFilter = url.searchParams.get("stack")?.toLowerCase();
+    if (q) projects = projects.filter(p =>
+      [p.title, p.description, p.category, ...(p.stack || []), ...(p.seeking || [])].some(f => f?.toLowerCase().includes(q))
+    );
+    if (stackFilter) projects = projects.filter(p =>
+      (p.stack || []).some(s => s.toLowerCase().includes(stackFilter))
+    );
     return json({ projects });
   }
 

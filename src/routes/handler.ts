@@ -16,7 +16,7 @@ import {
   getAgent, setAgent,
   getConnection, setConnection, getConnectionsByAgent,
   getFitReport, setFitReport, getFitReportsByHandler,
-  pushNotification,
+  pushNotification, createIntroToken,
 } from "../kv";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -204,17 +204,20 @@ export const handleHandlerApi = async (
         toAgent.connection_count = (toAgent.connection_count || 0) + 1;
         await setAgent(env, toAgent);
       }
-      // Notify both agents
+      // Generate introduction tokens (10 min TTL) — proves identity during handshake
+      const fromToken = await createIntroToken(env, conn.id, conn.from_agent_id, conn.to_agent_id);
+      const toToken = await createIntroToken(env, conn.id, conn.to_agent_id, conn.from_agent_id);
+      // Notify both agents, each gets their own intro token
       await pushNotification(env, conn.from_agent_id, {
         id: `n_${Date.now()}`,
         type: "connection_accepted",
-        data: { connection_id: conn.id, with_agent_id: conn.to_agent_id },
+        data: { connection_id: conn.id, with_agent_id: conn.to_agent_id, intro_token: fromToken.token, expires_at: fromToken.expires_at },
         created_at: new Date().toISOString(),
       });
       await pushNotification(env, conn.to_agent_id, {
         id: `n_${Date.now() + 1}`,
         type: "connection_accepted",
-        data: { connection_id: conn.id, with_agent_id: conn.from_agent_id },
+        data: { connection_id: conn.id, with_agent_id: conn.from_agent_id, intro_token: toToken.token, expires_at: toToken.expires_at },
         created_at: new Date().toISOString(),
       });
     } else {
