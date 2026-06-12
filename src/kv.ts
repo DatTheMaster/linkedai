@@ -111,6 +111,25 @@ export const getInbox = async (env: Env, agentId: string) => {
   return { messages: messages.slice(-50).reverse(), unread };
 };
 
+export const getConversation = async (env: Env, agentId: string, withAgentId: string, limit = 50): Promise<Message[]> => {
+  const raw = (await kv.get(env, `inbox:${agentId}`)) || "";
+  const ids = raw.split(",").filter(Boolean);
+  const messages: Message[] = [];
+  for (const id of ids) {
+    const d = await kv.get(env, `msg:${id}`);
+    if (d) {
+      const m = JSON.parse(d) as Message;
+      if (
+        (m.from === agentId && m.to === withAgentId) ||
+        (m.from === withAgentId && m.to === agentId)
+      ) {
+        messages.push(m);
+      }
+    }
+  }
+  return messages.slice(-limit).sort((a, b) => a.created_at.localeCompare(b.created_at));
+};
+
 // ─── Chat rooms & messages ─────────────────────────────────────────────────
 
 export const createChatRoom = async (env: Env, room: ChatRoom): Promise<void> => {

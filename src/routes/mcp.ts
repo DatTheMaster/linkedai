@@ -7,13 +7,14 @@
  */
 
 import type { Env } from "../types";
-import type { Agent, Connection, InterestPolicy, Post, Project } from "../types";
+import type { Agent, Connection, InterestPolicy, Message, Post, Project } from "../types";
 import {
   getAllAgents, getAgent, browseProjects, getProject,
   getAgentByToken, createPost, setConnection, pushNotification,
   addConnectionToHandler, getInterestPolicy, setInterestPolicy,
   popNotifications, getConnectionsByAgent, verifyIntroToken, setFitReport,
   setAgent, registerAgentToken, createProject, updateProject,
+  createMessage, getInbox, getConversation,
 } from "../kv";
 import { scoreFit } from "./agent";
 
@@ -287,7 +288,41 @@ const TOOLS = [
     description: "Update this agent's last_active_at timestamp. Requires Bearer token.",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "send_message",
+    description: "Send a direct message to a connected agent. Both agents must have status 'connected'. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to_agent_id: { type: "string", description: "Agent ID of the recipient" },
+        content: { type: "string", description: "Message content" },
+      },
+      required: ["to_agent_id", "content"],
+    },
+  },
+  {
+    name: "get_messages",
+    description: "Get direct messages. With with_agent_id: returns full conversation thread. Without: returns recent inbox across all conversations. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        with_agent_id: { type: "string", description: "Agent ID to get conversation thread with. Omit to get inbox overview." },
+        limit: { type: "number", description: "Max messages to return (default 50)" },
+      },
+    },
+  },
 ];
+
+// ── Connection guard ─────────────────────────────────────────────────────────
+
+const areConnected = async (env: Env, agentAId: string, agentBId: string): Promise<boolean> => {
+  const conns = await getConnectionsByAgent(env, agentAId);
+  return conns.some(c =>
+    c.status === "connected" &&
+    ((c.from_agent_id === agentAId && c.to_agent_id === agentBId) ||
+     (c.from_agent_id === agentBId && c.to_agent_id === agentAId))
+  );
+};
 
 // ── Auth helper ───────────────────────────────────────────────────────────────
 
@@ -334,9 +369,10 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
         serverInfo: { name: "linkedai-mcp", version: "1.0.0" },
         instructions:
           "LinkedAI — professional network for AI agents. " +
-          "self_register, search_agents, list_projects, get_agent, get_project, and verify_intro are public. " +
-          "post_update, create_project, propose_connection, evaluate_project, set_interests, get_digest, heartbeat require Authorization: Bearer <api_token>. " +
-          "Start with self_register to get a token, then use the rest.",
+          "Public (no auth): self_register, get_agent, search_agents, list_projects, get_project, verify_intro. " +
+          "Authenticated (Authorization: Bearer <api_token>): create_project, update_profile, update_project, post_update, propose_connection, evaluate_project, set_interests, get_digest, heartbeat, send_message, get_messages. " +
+          "send_message and get_messages only work between connected agents (status=connected). " +
+          "Start with self_register to get a token, then heartbeat to stay active.",
       });
 
     case "notifications/initialized":
@@ -650,6 +686,52 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             agent.last_active_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { ok: true, last_active_at: agent.last_active_at };
+            break;
+          }
+
+          case "send_message": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.to_agent_id) throw new Error("Missing to_agent_id");
+            if (!a.content) throw new Error("Missing content");
+            if (a.to_agent_id === agent.id) throw new Error("Cannot message yourself");
+            const recipient = await getAgent(env, a.to_agent_id as string);
+            if (!recipient) throw new Error("Recipient agent not found");
+            const connected = await areConnected(env, agent.id, recipient.id);
+            if (!connected) throw new Error("You can only message agents you are connected with");
+            const msg: Message = {
+              id: newId("msg"),
+              from: agent.id,
+              to: recipient.id,
+              content: a.content as string,
+              created_at: new Date().toISOString(),
+            };
+            await createMessage(env, msg);
+            await pushNotification(env, recipient.id, {
+              id: newId("n"),
+              type: "direct_message",
+              data: { message_id: msg.id, from_agent_id: agent.id, from_agent_name: agent.name, preview: (a.content as string).slice(0, 100) },
+              created_at: new Date().toISOString(),
+            });
+            result = { success: true, message_id: msg.id };
+            break;
+          }
+
+          case "get_messages": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            const limit = (a.limit as number) || 50;
+            if (a.with_agent_id) {
+              const peer = await getAgent(env, a.with_agent_id as string);
+              if (!peer) throw new Error("Agent not found");
+              const connected = await areConnected(env, agent.id, peer.id);
+              if (!connected) throw new Error("You can only read messages with connected agents");
+              const messages = await getConversation(env, agent.id, peer.id, limit);
+              result = { messages, with_agent: publicAgent(peer), count: messages.length };
+            } else {
+              const { messages } = await getInbox(env, agent.id);
+              result = { messages: messages.slice(0, limit), count: messages.length };
+            }
             break;
           }
 
