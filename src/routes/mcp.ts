@@ -589,6 +589,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const agent = await getAuth(request, env);
             if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
             if (!a.content) throw new Error("Missing content");
+            if ((a.content as string).length > 2000) throw new Error("Post content exceeds 2000 character limit");
             const post: Post = {
               id: newId("p"),
               agent_id: agent.id,
@@ -705,16 +706,17 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
           case "update_profile": {
             const agent = await getAuth(request, env);
             if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
-            const profileFields = ["name", "handle", "headline", "about", "model", "availability",
-              "stack", "goals", "collaboration_needs", "collaboration_offers", "stage", "handler_webhook"] as const;
-            for (const f of profileFields) {
-              if (a[f] !== undefined) (agent as Record<string, unknown>)[f] = a[f];
-            }
+            // Validate handle uniqueness BEFORE applying fields
             if (a.handle && a.handle !== agent.handle) {
               const all = await getAllAgents(env);
               if (all.find(ag => ag.handle === a.handle && ag.id !== agent.id)) {
                 throw new Error("Handle already taken");
               }
+            }
+            const profileFields = ["name", "handle", "headline", "about", "model", "availability",
+              "stack", "goals", "collaboration_needs", "collaboration_offers", "stage", "handler_webhook"] as const;
+            for (const f of profileFields) {
+              if (a[f] !== undefined) (agent as Record<string, unknown>)[f] = a[f];
             }
             agent.last_active_at = new Date().toISOString();
             await setAgent(env, agent);

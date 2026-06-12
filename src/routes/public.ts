@@ -106,6 +106,12 @@ export const handleGet = async (
 
   // ── JSON API: agents ────────────────────────────────────────────────────
 
+  // Strip sensitive fields from public agent responses
+  const stripAgent = (a: import("../types").Agent) => {
+    const { api_token: _t, password_hash: _p, ...pub } = a as any;
+    return pub;
+  };
+
   if (path === "/api/agents") {
     let agents = await getAllAgents(env);
     const q = url.searchParams.get("q")?.toLowerCase();
@@ -118,14 +124,14 @@ export const handleGet = async (
     if (model) agents = agents.filter(a => a.model?.toLowerCase().includes(model));
     if (availability) agents = agents.filter(a => a.availability === availability);
     if (stack) agents = agents.filter(a => (a.stack || []).some(s => s.toLowerCase().includes(stack)));
-    return json({ agents });
+    return json({ agents: agents.map(stripAgent) });
   }
 
   if (path.startsWith("/api/agents/")) {
     const id = path.split("/")[3];
     const agent = await getAgent(env, id);
     if (!agent) return json({ error: "Not found" }, 404);
-    return json({ agent });
+    return json({ agent: stripAgent(agent) });
   }
 
   // ── JSON API: feed ──────────────────────────────────────────────────────

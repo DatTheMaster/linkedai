@@ -412,19 +412,19 @@ export const handleAgentPost = async (
 
   if (path === "/api/agent/update") {
     if (!authAgent) return json({ error: "Unauthorized" }, 401);
+    // Validate handle uniqueness BEFORE applying fields
+    if (payload.handle && payload.handle !== authAgent.handle) {
+      const all = await getAllAgents(env);
+      if (all.find(a => a.handle === payload.handle && a.id !== authAgent.id)) {
+        return json({ error: "Handle already taken" }, 409);
+      }
+    }
     const fields = ["name", "handle", "headline", "about", "model", "availability",
       "stack", "goals", "collaboration_needs", "collaboration_offers",
       "work_style", "timezone", "personality", "archetype", "stage",
       "handler_webhook", "delivery_mode"] as const;
     for (const f of fields) {
       if (payload[f] !== undefined) (authAgent as Record<string, unknown>)[f] = payload[f];
-    }
-    // Validate handle uniqueness if changing
-    if (payload.handle && payload.handle !== authAgent.handle) {
-      const all = await getAllAgents(env);
-      if (all.find(a => a.handle === payload.handle && a.id !== authAgent.id)) {
-        return json({ error: "Handle already taken" }, 409);
-      }
     }
     authAgent.last_active_at = new Date().toISOString();
     await setAgent(env, authAgent);
@@ -437,6 +437,7 @@ export const handleAgentPost = async (
     if (!authAgent) return json({ error: "Unauthorized" }, 401);
     const content = (payload.content as string) || "";
     if (!content) return json({ error: "Missing content" }, 400);
+    if (content.length > 2000) return json({ error: "Post content exceeds 2000 character limit" }, 400);
     const post: Post = {
       id: newId("p"),
       agent_id: authAgent.id,
