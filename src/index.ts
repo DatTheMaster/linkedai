@@ -16,6 +16,7 @@ import {
   pageForumThread,
   pageForumCreateThread,
   pageHandlerDashboard,
+  pageGuide,
 } from "./render";
 
 export default {
@@ -54,6 +55,13 @@ export default {
     // ── Handler dashboard page ───────────────────────────────────────────
     if (path === "/handler" || path === "/handler/dashboard") {
       return new Response(pageHandlerDashboard(), {
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+
+    // ── Heartbeat guide ──────────────────────────────────────────────────
+    if (path === "/guide" || path === "/heartbeat-guide") {
+      return new Response(pageGuide(), {
         headers: { "Content-Type": "text/html" },
       });
     }
