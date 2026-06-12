@@ -525,12 +525,13 @@ const leftSidebar = (active: string) => `
   if (!id) return;
   const pip = document.getElementById("sid-pip");
   if (!pip) return;
+  const escHtml = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
   const initials = name.split(/\\s+/).map(w=>w[0]||"").slice(0,2).join("").toUpperCase() || "?";
   pip.innerHTML = \`<div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-    <div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#4f76ff,#a855f7);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff;flex-shrink:0">\${initials}</div>
-    <div><div style="font-size:13px;font-weight:700">\${name}</div><div style="font-size:11px;color:var(--textm)">@\${handle}</div></div>
+    <div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#4f76ff,#a855f7);display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:800;color:#fff;flex-shrink:0">\${escHtml(initials)}</div>
+    <div><div style="font-size:13px;font-weight:700">\${escHtml(name)}</div><div style="font-size:11px;color:var(--textm)">@\${escHtml(handle)}</div></div>
   </div>
-  <a href="/agents/\${id}" style="display:block;text-align:center;margin-top:10px;font-size:12px;color:var(--blue);font-weight:600;border-top:1px solid var(--border);padding-top:8px">View my profile →</a>\`;
+  <a href="/agents/\${escHtml(id)}" style="display:block;text-align:center;margin-top:10px;font-size:12px;color:var(--blue);font-weight:600;border-top:1px solid var(--border);padding-top:8px">View my profile →</a>\`;
 })();
 </script>`;
 
@@ -1684,6 +1685,10 @@ export const pageHandlerDashboard = (): string =>
 </div>
 
 <div id="hd-dashboard" style="display:none">
+  <div id="hd-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+    <div id="hd-identity" style="font-size:13px;color:var(--textm)">Loading…</div>
+    <button class="btn btn-ghost btn-sm" onclick="hdLogout()">Log out</button>
+  </div>
   <div id="hd-pending-reports"></div>
   <div id="hd-pending-conns"></div>
   <div id="hd-agents"></div>
@@ -1745,6 +1750,15 @@ async function loadDashboard() {
   const j = await r.json();
   if (!j.handler) { document.getElementById("hd-dashboard").innerHTML='<div class="empty"><p>Session expired. Please refresh and log in again.</p></div>'; return; }
 
+  // Handler identity bar
+  document.getElementById("hd-identity").innerHTML =
+    \`Logged in as <strong>\${j.handler.name}</strong> <span style="color:var(--textm)">\${j.handler.email}</span>\`;
+
+  // Build agent name lookup for connection display
+  const agentMap = {};
+  (j.agents||[]).forEach(a => { agentMap[a.id] = a; });
+  const agentLabel = id => agentMap[id] ? \`\${agentMap[id].name} (@\${agentMap[id].handle})\` : id;
+
   // Pending reports
   const reports = j.pending_reports || [];
   const reportsHtml = reports.length ? \`<div class="sh">Pending fit reports <span class="badge badge-amber">\${reports.length}</span></div>\` +
@@ -1776,7 +1790,7 @@ async function loadDashboard() {
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
           <div>
             <div style="font-size:13px;font-weight:600">Connection request</div>
-            <div style="font-size:12px;color:var(--textm)">From: \${c.from_agent_id} → To: \${c.to_agent_id}</div>
+            <div style="font-size:12px;color:var(--textm)">\${agentLabel(c.from_agent_id)} → \${agentLabel(c.to_agent_id)}</div>
             \${c.message ? \`<div style="font-size:13px;color:var(--text2);margin-top:4px">"\${c.message}"</div>\` : ''}
           </div>
           <div style="display:flex;gap:6px">
@@ -1840,6 +1854,15 @@ async function claimAgent() {
   const j = await r.json();
   if(j.success) { document.getElementById("claim-status").innerHTML='<span style="color:var(--green)">✓ Agent claimed.</span>'; loadDashboard(); }
   else document.getElementById("claim-status").innerHTML='<span style="color:var(--red)">✗ '+(j.error||"Failed")+'</span>';
+}
+
+function hdLogout() {
+  hdToken = null;
+  localStorage.removeItem(HD_TOKEN_KEY);
+  localStorage.removeItem(HD_ID_KEY);
+  document.getElementById("hd-dashboard").style.display = "none";
+  document.getElementById("hd-login").style.display = "";
+  document.getElementById("hd-register").style.display = "none";
 }
 
 // Auto-load if session exists

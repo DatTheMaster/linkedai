@@ -1,5 +1,8 @@
 node_modules/
 .wrangler/
 .env
+.tokens
 dist/
 *.js.map
+test_api.py
+test_api.sh

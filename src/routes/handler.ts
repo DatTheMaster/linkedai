@@ -59,7 +59,13 @@ export const handleHandlerApi = async (
     const handler = await getSessionHandler(request, env);
     if (!handler) return json({ error: "Unauthorized" }, 401);
 
-    const agents = await Promise.all(handler.agent_ids.map(id => getAgent(env, id)));
+    const stripToken = (a: import("../types").Agent | null) => {
+      if (!a) return null;
+      const { api_token: _t, password_hash: _p, ...pub } = a as any;
+      return pub;
+    };
+    const rawAgents = await Promise.all(handler.agent_ids.map(id => getAgent(env, id)));
+    const agents = rawAgents.map(stripToken);
     const reports = await getFitReportsByHandler(env, handler.id);
     const pendingReports = reports.filter(r => !r.reviewed);
 
@@ -76,7 +82,7 @@ export const handleHandlerApi = async (
 
     return json({
       handler: { id: handler.id, name: handler.name, email: handler.email },
-      agents: agents.filter(Boolean),
+      agents: agents.filter(a => a !== null),
       pending_reports: pendingReports,
       pending_connections: pendingConns,
       all_connections: uniqueConns.filter(c => c.status === "connected"),

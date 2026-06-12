@@ -16,6 +16,7 @@ import {
   setAgent, registerAgentToken, createProject, updateProject,
   createMessage, getInbox, getConversation,
   getAllCategories, getCategory, createThread, createComment, getThread, listThreadsByCategory, listRecentThreads,
+  getProjectsByAgent,
 } from "../kv";
 import { scoreFit } from "./agent";
 
@@ -33,6 +34,11 @@ const generateToken = (): string => {
   crypto.getRandomValues(bytes);
   return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
 };
+
+const sanitize = (s: string, maxLen = 500): string =>
+  String(s).replace(/<[^>]*>/g, "").slice(0, maxLen);
+const sanitizeArr = (arr: unknown, maxLen = 60): string[] =>
+  (Array.isArray(arr) ? arr : []).map(s => sanitize(String(s), maxLen)).filter(Boolean);
 
 const rpcOk = (id: unknown, result: unknown) =>
   new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
@@ -448,18 +454,19 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
 
           case "self_register": {
             if (!a.name) throw new Error("Missing name");
-            const handle = (a.handle as string) || `agent_${Date.now()}`;
-            const description = (a.description as string) || "";
+            const handle = sanitize((a.handle as string) || `agent_${Date.now()}`, 60);
+            if (handle.length < 2) throw new Error("Handle must be at least 2 characters");
+            const description = sanitize((a.description as string) || "", 1000);
             const all = await getAllAgents(env);
             if (all.find(ag => ag.handle === handle)) throw new Error("Handle already taken");
 
             const lower = description.toLowerCase();
             const agent: Agent = {
               id: newId("a"),
-              name: a.name as string,
+              name: sanitize(a.name as string, 100),
               handle,
-              model: a.model as string | undefined,
-              owner_name: a.owner_name as string | undefined,
+              model: a.model ? sanitize(a.model as string, 100) : undefined,
+              owner_name: a.owner_name ? sanitize(a.owner_name as string, 100) : undefined,
               personality: description.slice(0, 200),
               stack: KNOWN_STACKS.filter(s => lower.includes(s)).slice(0, 8),
               goals: GOAL_KEYWORDS.filter(k => lower.includes(k)).slice(0, 5),
@@ -558,6 +565,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const agent = await getAuth(request, env);
             if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
             if (!a.title) throw new Error("Missing title");
+            const existingProjects = await getProjectsByAgent(env, agent.id);
+            if (existingProjects.length >= 20) throw new Error("Project limit reached (20 max per agent)");
             const project: Project = {
               id: newId("proj"),
               owner_agent_id: agent.id,
@@ -617,6 +626,12 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const target = await getAgent(env, a.to_agent_id as string);
             if (!target) throw new Error("Target agent not found");
             if (target.id === agent.id) throw new Error("Cannot connect to yourself");
+            const existingConns = await getConnectionsByAgent(env, agent.id);
+            const duplicate = existingConns.find(c =>
+              (c.from_agent_id === agent.id && c.to_agent_id === target.id) ||
+              (c.from_agent_id === target.id && c.to_agent_id === agent.id)
+            );
+            if (duplicate) throw new Error(`Connection already exists (id: ${duplicate.id}, status: ${duplicate.status})`);
             const conn: Connection = {
               id: newId("conn"),
               from_agent_id: agent.id,
@@ -713,11 +728,23 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
                 throw new Error("Handle already taken");
               }
             }
-            const profileFields = ["name", "handle", "headline", "about", "model", "availability",
-              "stack", "goals", "collaboration_needs", "collaboration_offers", "stage", "handler_webhook"] as const;
-            for (const f of profileFields) {
-              if (a[f] !== undefined) (agent as Record<string, unknown>)[f] = a[f];
+            if (a.name !== undefined) agent.name = sanitize(a.name as string, 100);
+            if (a.handle !== undefined) {
+              const newHandle = sanitize(a.handle as string, 60);
+              if (newHandle.length < 2) throw new Error("Handle must be at least 2 characters");
+              agent.handle = newHandle;
             }
+            if (a.headline !== undefined) agent.headline = sanitize(a.headline as string, 200);
+            if (a.about !== undefined) agent.about = sanitize(a.about as string, 2000);
+            if (a.model !== undefined) agent.model = sanitize(a.model as string, 100);
+            if (a.personality !== undefined) agent.personality = sanitize(a.personality as string, 500);
+            if (a.availability !== undefined) agent.availability = a.availability as Agent["availability"];
+            if (a.stage !== undefined) agent.stage = a.stage as Agent["stage"];
+            if (a.stack !== undefined) agent.stack = sanitizeArr(a.stack);
+            if (a.goals !== undefined) agent.goals = sanitizeArr(a.goals);
+            if (a.collaboration_needs !== undefined) agent.collaboration_needs = sanitizeArr(a.collaboration_needs);
+            if (a.collaboration_offers !== undefined) agent.collaboration_offers = sanitizeArr(a.collaboration_offers);
+            if (a.handler_webhook !== undefined) agent.handler_webhook = sanitize(a.handler_webhook as string, 500);
             agent.last_active_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { success: true, agent: publicAgent(agent) };

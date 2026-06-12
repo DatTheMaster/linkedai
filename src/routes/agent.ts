@@ -14,7 +14,7 @@ import {
   getAgent, setAgent, getAllAgents, getAgentByToken, registerAgentToken,
   createPost, createMessage, getInbox,
   createChatMessage, listChatRooms, getChatRoom, getProject,
-  createProject, updateProject, browseProjects,
+  createProject, updateProject, browseProjects, getProjectsByAgent,
   getConnection, setConnection, getConnectionsByAgent, addConnectionToHandler,
   getFitReport, setFitReport,
   pushNotification, popNotifications,
@@ -23,6 +23,14 @@ import {
   getHandler,
   kv,
 } from "../kv";
+
+// ─── Input sanitization ────────────────────────────────────────────────────
+
+const sanitize = (s: string, maxLen = 500): string =>
+  String(s).replace(/<[^>]*>/g, "").slice(0, maxLen);
+
+const sanitizeArr = (arr: unknown, maxLen = 60): string[] =>
+  (Array.isArray(arr) ? arr : []).map(s => sanitize(String(s), maxLen)).filter(Boolean);
 
 // ─── Token helpers ─────────────────────────────────────────────────────────
 
@@ -196,8 +204,8 @@ export const handleAgentPost = async (
   // ── Registration (human form) ─────────────────────────────────────────
 
   if (path === "/api/agent/register" || action === "register") {
-    const name = payload.name as string;
-    const handle = (payload.handle as string) || `agent_${Date.now()}`;
+    const name = sanitize((payload.name as string) || "", 100);
+    const handle = sanitize((payload.handle as string) || `agent_${Date.now()}`, 40);
     if (!name) return json({ error: "Missing name" }, 400);
     const all = await getAllAgents(env);
     if (all.find(a => a.handle === handle)) {
@@ -209,22 +217,22 @@ export const handleAgentPost = async (
       id,
       name,
       handle,
-      headline: (payload.headline as string) || undefined,
-      about: (payload.about as string) || undefined,
-      model: (payload.model as string) || undefined,
-      owner_name: (payload.owner_name as string) || undefined,
+      headline: payload.headline ? sanitize(payload.headline as string, 200) : undefined,
+      about: payload.about ? sanitize(payload.about as string, 2000) : undefined,
+      model: payload.model ? sanitize(payload.model as string, 100) : undefined,
+      owner_name: payload.owner_name ? sanitize(payload.owner_name as string, 100) : undefined,
       owner_email: (payload.owner_email as string) || undefined,
-      project_name: (payload.project_name as string) || undefined,
-      stack: (payload.stack as string[]) || [],
+      project_name: payload.project_name ? sanitize(payload.project_name as string, 100) : undefined,
+      stack: sanitizeArr(payload.stack),
       stage: (payload.stage as string) || "idea",
-      goals: (payload.goals as string[]) || [],
-      collaboration_needs: (payload.collaboration_needs as string[]) || [],
-      collaboration_offers: (payload.collaboration_offers as string[]) || [],
-      work_style: (payload.work_style as string) || undefined,
-      timezone: (payload.timezone as string) || undefined,
-      personality: (payload.personality as string) || undefined,
-      archetype: (payload.archetype as string) || undefined,
-      alignment: (payload.alignment as string) || undefined,
+      goals: sanitizeArr(payload.goals),
+      collaboration_needs: sanitizeArr(payload.collaboration_needs),
+      collaboration_offers: sanitizeArr(payload.collaboration_offers),
+      work_style: payload.work_style ? sanitize(payload.work_style as string, 100) : undefined,
+      timezone: payload.timezone ? sanitize(payload.timezone as string, 50) : undefined,
+      personality: payload.personality ? sanitize(payload.personality as string, 1000) : undefined,
+      archetype: payload.archetype ? sanitize(payload.archetype as string, 50) : undefined,
+      alignment: payload.alignment ? sanitize(payload.alignment as string, 50) : undefined,
       availability: (payload.availability as Agent["availability"]) || "open",
       handler_webhook: (payload.handler_webhook as string) || undefined,
       reputation_score: 10,
@@ -242,9 +250,9 @@ export const handleAgentPost = async (
   // ── Self-registration (freeform description) ───────────────────────────
 
   if (action === "self_register" || path === "/api/agent/self_register") {
-    const name = payload.name as string;
-    const handle = (payload.handle as string) || `agent_${Date.now()}`;
-    const description = (payload.description as string) || "";
+    const name = sanitize((payload.name as string) || "", 100);
+    const handle = sanitize((payload.handle as string) || `agent_${Date.now()}`, 40);
+    const description = sanitize((payload.description as string) || "", 2000);
     if (!name) return json({ error: "Missing name" }, 400);
     const all = await getAllAgents(env);
     if (all.find(a => a.handle === handle)) {
@@ -263,8 +271,8 @@ export const handleAgentPost = async (
       id,
       name,
       handle,
-      model: (payload.model as string) || undefined,
-      owner_name: (payload.owner_name as string) || undefined,
+      model: payload.model ? sanitize(payload.model as string, 100) : undefined,
+      owner_name: payload.owner_name ? sanitize(payload.owner_name as string, 100) : undefined,
       owner_email: (payload.owner_email as string) || undefined,
       project_name: undefined,
       stack: extractedStack.slice(0, 8),
@@ -272,11 +280,11 @@ export const handleAgentPost = async (
       goals: extractedGoals.length ? extractedGoals.slice(0, 5) : ["networking"],
       collaboration_needs: extractedNeeds.slice(0, 5),
       collaboration_offers: extractedOffers.slice(0, 5),
-      work_style: (payload.work_style as string) || undefined,
-      timezone: (payload.timezone as string) || undefined,
-      personality: (payload.personality as string) || description.slice(0, 200),
-      archetype: (payload.archetype as string) || undefined,
-      alignment: (payload.alignment as string) || undefined,
+      work_style: payload.work_style ? sanitize(payload.work_style as string, 100) : undefined,
+      timezone: payload.timezone ? sanitize(payload.timezone as string, 50) : undefined,
+      personality: payload.personality ? sanitize(payload.personality as string, 1000) : description.slice(0, 200),
+      archetype: payload.archetype ? sanitize(payload.archetype as string, 50) : undefined,
+      alignment: payload.alignment ? sanitize(payload.alignment as string, 50) : undefined,
       availability: (payload.availability as Agent["availability"]) || "open",
       handler_webhook: (payload.handler_webhook as string) || undefined,
       reputation_score: 10,
@@ -319,6 +327,12 @@ export const handleAgentPost = async (
     const toAgent = await getAgent(env, toAgentId);
     if (!toAgent) return json({ error: "Target agent not found" }, 404);
     if (toAgent.id === authAgent.id) return json({ error: "Cannot connect to yourself" }, 400);
+    const existingConns = await getConnectionsByAgent(env, authAgent.id);
+    const duplicate = existingConns.find(c =>
+      (c.from_agent_id === authAgent.id && c.to_agent_id === toAgentId) ||
+      (c.from_agent_id === toAgentId && c.to_agent_id === authAgent.id)
+    );
+    if (duplicate) return json({ error: `Connection already exists (id: ${duplicate.id}, status: ${duplicate.status})` }, 409);
 
     const conn: Connection = {
       id: newId("conn"),
@@ -419,6 +433,19 @@ export const handleAgentPost = async (
         return json({ error: "Handle already taken" }, 409);
       }
     }
+    if (payload.name) payload.name = sanitize(payload.name as string, 100);
+    if (payload.handle) payload.handle = sanitize(payload.handle as string, 40);
+    if (payload.headline) payload.headline = sanitize(payload.headline as string, 200);
+    if (payload.about) payload.about = sanitize(payload.about as string, 2000);
+    if (payload.model) payload.model = sanitize(payload.model as string, 100);
+    if (payload.personality) payload.personality = sanitize(payload.personality as string, 1000);
+    if (payload.work_style) payload.work_style = sanitize(payload.work_style as string, 100);
+    if (payload.timezone) payload.timezone = sanitize(payload.timezone as string, 50);
+    if (payload.archetype) payload.archetype = sanitize(payload.archetype as string, 50);
+    if (payload.stack) payload.stack = sanitizeArr(payload.stack);
+    if (payload.goals) payload.goals = sanitizeArr(payload.goals);
+    if (payload.collaboration_needs) payload.collaboration_needs = sanitizeArr(payload.collaboration_needs);
+    if (payload.collaboration_offers) payload.collaboration_offers = sanitizeArr(payload.collaboration_offers);
     const fields = ["name", "handle", "headline", "about", "model", "availability",
       "stack", "goals", "collaboration_needs", "collaboration_offers",
       "work_style", "timezone", "personality", "archetype", "stage",
@@ -461,17 +488,21 @@ export const handleAgentPost = async (
 
   if (path === "/api/agent/project") {
     if (!authAgent) return json({ error: "Unauthorized" }, 401);
-    const title = (payload.title as string) || "";
+    const existingProjects = await getProjectsByAgent(env, authAgent.id);
+    if (existingProjects.length >= 20) {
+      return json({ error: "Project limit reached (20 max per agent)" }, 400);
+    }
+    const title = sanitize((payload.title as string) || "", 150);
     if (!title) return json({ error: "Missing title" }, 400);
     const project: Project = {
       id: newId("proj"),
       owner_agent_id: authAgent.id,
       title,
-      description: (payload.description as string) || "",
-      category: (payload.category as string) || "general",
-      seeking: (payload.seeking as string[]) || [],
-      offering: (payload.offering as string[]) || [],
-      stack: (payload.stack as string[]) || [],
+      description: sanitize((payload.description as string) || "", 2000),
+      category: sanitize((payload.category as string) || "general", 60),
+      seeking: sanitizeArr(payload.seeking),
+      offering: sanitizeArr(payload.offering),
+      stack: sanitizeArr(payload.stack),
       stage: (payload.stage as string) || "idea",
       status: (payload.status as Project["status"]) || "recruiting",
       max_collaborators: (payload.max_collaborators as number) || 5,
