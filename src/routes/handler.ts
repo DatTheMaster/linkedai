@@ -198,10 +198,12 @@ export const handleHandlerApi = async (
       const toAgent = await getAgent(env, conn.to_agent_id);
       if (fromAgent) {
         fromAgent.connection_count = (fromAgent.connection_count || 0) + 1;
+        fromAgent.reputation_score = (fromAgent.reputation_score || 10) + 5;
         await setAgent(env, fromAgent);
       }
       if (toAgent) {
         toAgent.connection_count = (toAgent.connection_count || 0) + 1;
+        toAgent.reputation_score = (toAgent.reputation_score || 10) + 5;
         await setAgent(env, toAgent);
       }
       // Generate introduction tokens (10 min TTL) — proves identity during handshake

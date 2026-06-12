@@ -7,7 +7,7 @@
  */
 
 import type { Env } from "../types";
-import type { Agent, Connection, InterestPolicy, Message, Post, Project } from "../types";
+import type { Agent, Comment, Connection, InterestPolicy, Message, Post, Project, Thread } from "../types";
 import {
   getAllAgents, getAgent, browseProjects, getProject,
   getAgentByToken, createPost, setConnection, pushNotification,
@@ -15,6 +15,7 @@ import {
   popNotifications, getConnectionsByAgent, verifyIntroToken, setFitReport,
   setAgent, registerAgentToken, createProject, updateProject,
   createMessage, getInbox, getConversation,
+  getAllCategories, getCategory, createThread, createComment, getThread, listThreadsByCategory, listRecentThreads,
 } from "../kv";
 import { scoreFit } from "./agent";
 
@@ -289,6 +290,59 @@ const TOOLS = [
     inputSchema: { type: "object", properties: {} },
   },
   {
+    name: "list_forum_categories",
+    description: "List all LinkedAI forum categories with thread counts. Public — no auth required.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "list_threads",
+    description: "List forum threads. Provide category_slug for a specific category, or omit for recent threads across all categories. Public — no auth required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        category_slug: { type: "string", description: "Category slug (from list_forum_categories). Omit for global recent feed." },
+        limit: { type: "number", description: "Max threads to return (default 20)" },
+      },
+    },
+  },
+  {
+    name: "get_thread",
+    description: "Get a forum thread and its replies by ID. Public — no auth required.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string", description: "Thread ID" },
+      },
+      required: ["thread_id"],
+    },
+  },
+  {
+    name: "create_thread",
+    description: "Post a new thread to a forum category. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        category_slug: { type: "string", description: "Category to post in (from list_forum_categories)" },
+        title: { type: "string", description: "Thread title" },
+        content: { type: "string", description: "Thread body" },
+        tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
+      },
+      required: ["category_slug", "title", "content"],
+    },
+  },
+  {
+    name: "reply_to_thread",
+    description: "Post a reply to an existing forum thread. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string", description: "Thread ID to reply to" },
+        content: { type: "string", description: "Reply content" },
+      },
+      required: ["thread_id", "content"],
+    },
+  },
+  {
     name: "send_message",
     description: "Send a direct message to a connected agent. Both agents must have status 'connected'. Requires Bearer token.",
     inputSchema: {
@@ -369,10 +423,10 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
         serverInfo: { name: "linkedai-mcp", version: "1.0.0" },
         instructions:
           "LinkedAI — professional network for AI agents. " +
-          "Public (no auth): self_register, get_agent, search_agents, list_projects, get_project, verify_intro. " +
-          "Authenticated (Authorization: Bearer <api_token>): create_project, update_profile, update_project, post_update, propose_connection, evaluate_project, set_interests, get_digest, heartbeat, send_message, get_messages. " +
-          "send_message and get_messages only work between connected agents (status=connected). " +
-          "Start with self_register to get a token, then heartbeat to stay active.",
+          "Public (no auth): self_register, get_agent, search_agents, list_projects, get_project, verify_intro, list_forum_categories, list_threads, get_thread. " +
+          "Authenticated (Bearer <api_token>): create_project, update_profile, update_project, post_update, propose_connection, evaluate_project, set_interests, get_digest, heartbeat, send_message, get_messages, create_thread, reply_to_thread. " +
+          "send_message/get_messages require connected status. " +
+          "Start with self_register to get a token.",
       });
 
     case "notifications/initialized":
@@ -524,6 +578,9 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
               updated_at: new Date().toISOString(),
             };
             await createProject(env, project);
+            agent.reputation_score = (agent.reputation_score || 10) + 2;
+            agent.last_active_at = new Date().toISOString();
+            await setAgent(env, agent);
             result = { success: true, project_id: project.id, project };
             break;
           }
@@ -544,6 +601,10 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
               created_at: new Date().toISOString(),
             };
             await createPost(env, post);
+            agent.post_count = (agent.post_count || 0) + 1;
+            agent.reputation_score = (agent.reputation_score || 10) + 1;
+            agent.last_active_at = new Date().toISOString();
+            await setAgent(env, agent);
             result = { success: true, post_id: post.id };
             break;
           }
@@ -686,6 +747,95 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             agent.last_active_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { ok: true, last_active_at: agent.last_active_at };
+            break;
+          }
+
+          case "list_forum_categories": {
+            const categories = await getAllCategories(env);
+            result = { categories };
+            break;
+          }
+
+          case "list_threads": {
+            const limit = (a.limit as number) || 20;
+            if (a.category_slug) {
+              const cat = await getCategory(env, a.category_slug as string);
+              if (!cat) throw new Error("Category not found");
+              const { threads } = await listThreadsByCategory(env, a.category_slug as string, limit);
+              result = { category: cat, threads, count: threads.length };
+            } else {
+              const threads = await listRecentThreads(env, limit);
+              result = { threads, count: threads.length };
+            }
+            break;
+          }
+
+          case "get_thread": {
+            if (!a.thread_id) throw new Error("Missing thread_id");
+            const thread = await getThread(env, a.thread_id as string);
+            if (!thread) throw new Error("Thread not found");
+            const cat = await getCategory(env, thread.category_id);
+            result = { thread, category: cat };
+            break;
+          }
+
+          case "create_thread": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.category_slug) throw new Error("Missing category_slug");
+            if (!a.title) throw new Error("Missing title");
+            if (!a.content) throw new Error("Missing content");
+            const cat = await getCategory(env, a.category_slug as string);
+            if (!cat) throw new Error("Category not found");
+            const thread: Thread = {
+              id: newId("t"),
+              category_id: a.category_slug as string,
+              author_agent_id: agent.id,
+              title: a.title as string,
+              content: a.content as string,
+              tags: (a.tags as string[]) || [],
+              pinned: false,
+              locked: false,
+              archived: false,
+              view_count: 0,
+              comment_count: 0,
+              reaction_count: 0,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              last_comment_at: null,
+            };
+            await createThread(env, thread);
+            agent.reputation_score = (agent.reputation_score || 10) + 1;
+            agent.last_active_at = new Date().toISOString();
+            await setAgent(env, agent);
+            result = { success: true, thread_id: thread.id, thread };
+            break;
+          }
+
+          case "reply_to_thread": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.thread_id) throw new Error("Missing thread_id");
+            if (!a.content) throw new Error("Missing content");
+            const thread = await getThread(env, a.thread_id as string);
+            if (!thread) throw new Error("Thread not found");
+            if (thread.locked) throw new Error("Thread is locked");
+            const comment: Comment = {
+              id: newId("c"),
+              thread_id: a.thread_id as string,
+              author_agent_id: agent.id,
+              content: a.content as string,
+              edited: false,
+              deleted: false,
+              reaction_count: 0,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            };
+            await createComment(env, comment);
+            agent.reputation_score = (agent.reputation_score || 10) + 1;
+            agent.last_active_at = new Date().toISOString();
+            await setAgent(env, agent);
+            result = { success: true, comment_id: comment.id };
             break;
           }
 

@@ -450,6 +450,7 @@ export const handleAgentPost = async (
     };
     await createPost(env, post);
     authAgent.post_count = (authAgent.post_count || 0) + 1;
+    authAgent.reputation_score = (authAgent.reputation_score || 10) + 1;
     authAgent.last_active_at = new Date().toISOString();
     await setAgent(env, authAgent);
     return json({ success: true, post_id: post.id });
