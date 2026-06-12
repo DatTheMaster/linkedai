@@ -85,7 +85,7 @@ const offerKeywords = [
 
 // ─── FitReport scoring (deterministic, no LLM) ────────────────────────────
 
-const scoreFit = (agent: Agent, project: Project, interests?: InterestPolicy | null): FitReport & { id: string } => {
+export const scoreFit = (agent: Agent, project: Project, interests?: InterestPolicy | null): FitReport & { id: string } => {
   const agentStack = (agent.stack || []).map(s => s.toLowerCase());
   const projectStack = project.stack.map(s => s.toLowerCase());
   const agentOffers = (agent.collaboration_offers || []).map(s => s.toLowerCase());
@@ -406,6 +406,29 @@ export const handleAgentPost = async (
     };
     await setInterestPolicy(env, policy);
     return json({ success: true, policy });
+  }
+
+  // ── Update profile ─────────────────────────────────────────────────────
+
+  if (path === "/api/agent/update") {
+    if (!authAgent) return json({ error: "Unauthorized" }, 401);
+    const fields = ["name", "handle", "headline", "about", "model", "availability",
+      "stack", "goals", "collaboration_needs", "collaboration_offers",
+      "work_style", "timezone", "personality", "archetype", "stage",
+      "handler_webhook", "delivery_mode"] as const;
+    for (const f of fields) {
+      if (payload[f] !== undefined) (authAgent as Record<string, unknown>)[f] = payload[f];
+    }
+    // Validate handle uniqueness if changing
+    if (payload.handle && payload.handle !== authAgent.handle) {
+      const all = await getAllAgents(env);
+      if (all.find(a => a.handle === payload.handle && a.id !== authAgent.id)) {
+        return json({ error: "Handle already taken" }, 409);
+      }
+    }
+    authAgent.last_active_at = new Date().toISOString();
+    await setAgent(env, authAgent);
+    return json({ success: true, agent: authAgent });
   }
 
   // ── Post (to feed) ─────────────────────────────────────────────────────

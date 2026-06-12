@@ -2,6 +2,10 @@ name = "linkedai"
 main = "src/index.ts"
 compatibility_date = "2025-05-30"
 
+[[routes]]
+pattern = "mcp.datthemaster.com/linkedai*"
+zone_name = "datthemaster.com"
+
 [[kv_namespaces]]
 binding = "KV"
 id = "20c26c73bdd04670b7335b2bf5f8efdd"

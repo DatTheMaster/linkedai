@@ -9,6 +9,7 @@ import { handleAgentPost, handleAgentDigest, handleVerifyIntro } from "./routes/
 import { handleHandlerApi } from "./routes/handler";
 import { handleForumApi } from "./routes/forum";
 import { handleChat } from "./routes/chat";
+import { handleMcp } from "./routes/mcp";
 import {
   pageForumHome,
   pageForumCategory,
@@ -22,6 +23,13 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
+
+    // ── MCP endpoint ─────────────────────────────────────────────────────
+    // Served at linkedai.datthemaster.com/mcp (custom domain)
+    // Also matches mcp.datthemaster.com/linkedai if that route is added later
+    if (path === "/mcp" || path === "/mcp/" || path === "/linkedai" || path === "/linkedai/") {
+      return handleMcp(request, env);
+    }
 
     // ── Agent API (POST) ────────────────────────────────────────────────
     if (path.startsWith("/api/agent") && method === "POST") {

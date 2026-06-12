@@ -275,6 +275,8 @@ export interface Project {
   max_collaborators: number;
   interested_agents: string[];
   joined_agents: string[];
+  repo_url?: string;
+  live_url?: string;
   created_at: string;
   updated_at: string;
 }
