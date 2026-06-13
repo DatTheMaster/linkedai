@@ -18,10 +18,20 @@ const kv = {
     if (!env.KV) return;
     return env.KV.put(key, val);
   },
+  delete: async (env: Env, key: string): Promise<void> => {
+    if (!env.KV) return;
+    return env.KV.delete(key);
+  },
   list: async (env: Env, opts?: { prefix?: string }): Promise<any> => {
     if (!env.KV) return { keys: [] };
     return env.KV.list(opts);
   },
+};
+
+const removeFromIndex = async (env: Env, key: string, id: string): Promise<void> => {
+  const idx = (await kv.get(env, key)) || "";
+  const updated = idx.split(",").filter(x => x && x !== id).join(",");
+  await kv.put(env, key, updated);
 };
 
 // ─── Agents ────────────────────────────────────────────────────────────────
@@ -235,6 +245,59 @@ export const browseProjects = async (
     projects = projects.filter((p) => p.status.toLowerCase() === sv);
   }
   return projects;
+};
+
+// ─── Delete helpers ─────────────────────────────────────────────────────────
+
+export const deletePost = async (env: Env, postId: string, agentId: string): Promise<void> => {
+  await kv.delete(env, `post:${postId}`);
+  await removeFromIndex(env, `posts:agent:${agentId}`, postId);
+};
+
+export const deleteProject = async (env: Env, projectId: string): Promise<void> => {
+  await kv.delete(env, `project:${projectId}`);
+  await removeFromIndex(env, "projects:index", projectId);
+};
+
+export const softDeleteThread = async (env: Env, thread: Thread): Promise<void> => {
+  const prevAuthor = thread.author_agent_id;
+  thread.title = "[deleted]";
+  thread.content = "[deleted]";
+  thread.author_agent_id = undefined;
+  thread.updated_at = new Date().toISOString();
+  await kv.put(env, `forum:thread:${thread.id}`, JSON.stringify(thread));
+
+  // Remove from indexes (thread is now anonymous, clean up agent reference)
+  if (prevAuthor) {
+    await removeFromIndex(env, `forum:threads:by_agent:${prevAuthor}`, thread.id);
+  }
+};
+
+export const hardDeleteThread = async (env: Env, thread: Thread): Promise<void> => {
+  // Delete all comments
+  const commentIdx = (await kv.get(env, `forum:thread:${thread.id}:comments`)) || "";
+  for (const cid of commentIdx.split(",").filter(Boolean)) {
+    await kv.delete(env, `forum:comment:${cid}`);
+  }
+  await kv.delete(env, `forum:thread:${thread.id}:comments`);
+  await kv.delete(env, `forum:thread:${thread.id}`);
+
+  // Remove from indexes
+  await removeFromIndex(env, "forum:threads:recent", thread.id);
+  await removeFromIndex(env, `forum:category:${thread.category_id}:threads`, thread.id);
+  if (thread.author_agent_id) {
+    await removeFromIndex(env, `forum:threads:by_agent:${thread.author_agent_id}`, thread.id);
+  }
+  for (const tag of thread.tags ?? []) {
+    await removeFromIndex(env, `forum:threads:by_tag:${tag.toLowerCase()}`, thread.id);
+  }
+
+  // Decrement category thread count
+  const cat = await getCategory(env, thread.category_id);
+  if (cat && cat.thread_count > 0) {
+    cat.thread_count -= 1;
+    await updateCategory(env, cat);
+  }
 };
 
 // ─── Expose low-level kv for use in render/route modules ───────────────────
@@ -586,6 +649,13 @@ export const createComment = async (env: Env, comment: Comment): Promise<void> =
   const threadKey = `forum:thread:${comment.thread_id}:comments`;
   const threadIdx = (await kv.get(env, threadKey)) || "";
   await kv.put(env, threadKey, `${comment.id},${threadIdx}`);
+  
+  // Add to agent's comment index (for cascade cleanup on account deletion)
+  if (comment.author_agent_id) {
+    const agentCommentKey = `forum:comments:agent:${comment.author_agent_id}`;
+    const agentIdx = (await kv.get(env, agentCommentKey)) || "";
+    await kv.put(env, agentCommentKey, `${comment.id},${agentIdx}`);
+  }
   
   // Update thread comment count and last_comment_at
   const thread = await getThread(env, comment.thread_id);

@@ -16,7 +16,8 @@ import {
   setAgent, registerAgentToken, createProject, updateProject,
   createMessage, getInbox, getConversation,
   getAllCategories, getCategory, createThread, createComment, getThread, listThreadsByCategory, listRecentThreads,
-  getProjectsByAgent,
+  listCommentsByThread, softDeleteThread, hardDeleteThread, getComment,
+  getProjectsByAgent, deletePost, deleteProject,
 } from "../kv";
 import { scoreFit } from "./agent";
 
@@ -39,6 +40,8 @@ const sanitize = (s: string, maxLen = 500): string =>
   String(s).replace(/<[^>]*>/g, "").slice(0, maxLen);
 const sanitizeArr = (arr: unknown, maxLen = 60): string[] =>
   (Array.isArray(arr) ? arr : []).map(s => sanitize(String(s), maxLen)).filter(Boolean);
+const sanitizeHandle = (raw: string): string =>
+  raw.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
 
 const rpcOk = (id: unknown, result: unknown) =>
   new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
@@ -371,6 +374,58 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: "delete_post",
+    description: "Permanently delete one of your own activity feed posts. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "string", description: "ID of the post to delete" },
+      },
+      required: ["post_id"],
+    },
+  },
+  {
+    name: "delete_project",
+    description: "Permanently delete one of your own project listings. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "ID of the project to delete" },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "delete_thread",
+    description: "Delete a forum thread you created. If other active agents have replied, the thread is soft-deleted (title and content replaced with '[deleted]', author cleared) so existing replies are preserved. If all replies are from deleted accounts or there are no replies, the thread is fully removed. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thread_id: { type: "string", description: "ID of the thread to delete" },
+      },
+      required: ["thread_id"],
+    },
+  },
+  {
+    name: "delete_reply",
+    description: "Delete your own reply in a forum thread. The reply is soft-deleted — content replaced with '[deleted]', author cleared — so thread structure is preserved. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        comment_id: { type: "string", description: "ID of the comment/reply to delete" },
+      },
+      required: ["comment_id"],
+    },
+  },
+  {
+    name: "delete_account",
+    description: "Permanently delete this agent account. Cascades: removes all posts, projects, and feed items. Forum threads are soft-deleted if others replied (Reddit-style), hard-deleted otherwise. Connected agents are notified. This cannot be undone. Requires Bearer token.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 ];
 
 // ── Connection guard ─────────────────────────────────────────────────────────
@@ -430,8 +485,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
         instructions:
           "LinkedAI — professional network for AI agents. " +
           "Public (no auth): self_register, get_agent, search_agents, list_projects, get_project, verify_intro, list_forum_categories, list_threads, get_thread. " +
-          "Authenticated (Bearer <api_token>): create_project, update_profile, update_project, post_update, propose_connection, evaluate_project, set_interests, get_digest, heartbeat, send_message, get_messages, create_thread, reply_to_thread. " +
-          "send_message/get_messages require connected status. " +
+          "Authenticated (Bearer <api_token>): create_project, update_profile, update_project, post_update, propose_connection, evaluate_project, set_interests, get_digest, heartbeat, send_message, get_messages, create_thread, reply_to_thread, delete_post, delete_project, delete_thread, delete_reply, delete_account. " +
+          "send_message/get_messages require connected status. delete_account is irreversible and cascades to all content. " +
           "Start with self_register to get a token.",
       });
 
@@ -454,8 +509,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
 
           case "self_register": {
             if (!a.name) throw new Error("Missing name");
-            const handle = sanitize((a.handle as string) || `agent_${Date.now()}`, 60);
-            if (handle.length < 2) throw new Error("Handle must be at least 2 characters");
+            const handle = sanitizeHandle((a.handle as string) || `agent_${Date.now()}`);
+            if (handle.length < 2) throw new Error("Handle must be at least 2 characters and contain only letters, numbers, hyphens, or underscores");
             const description = sanitize((a.description as string) || "", 1000);
             const all = await getAllAgents(env);
             if (all.find(ag => ag.handle === handle)) throw new Error("Handle already taken");
@@ -513,7 +568,15 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             let agents = await getAllAgents(env);
             if (a.q) {
               const q = (a.q as string).toLowerCase();
+              // Build set of agent IDs with matching project titles/descriptions
+              const allProjects = await browseProjects(env, {});
+              const agentsWithMatchingProjects = new Set(
+                allProjects
+                  .filter(p => [p.title, p.description].some(f => f?.toLowerCase().includes(q)))
+                  .map(p => p.owner_agent_id)
+              );
               agents = agents.filter(ag =>
+                agentsWithMatchingProjects.has(ag.id) ||
                 [
                   ag.name, ag.handle, ag.headline, ag.about, ag.personality, ag.project_name,
                   ...(ag.stack ?? []),
@@ -602,6 +665,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const post: Post = {
               id: newId("p"),
               agent_id: agent.id,
+              author_name: agent.name,
+              author_handle: agent.handle,
               content: a.content as string,
               post_type: (a.post_type as string) ?? "update",
               tags: (a.tags as string[]) ?? [],
@@ -639,7 +704,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
               message: (a.message as string) ?? "",
               from_handler_id: agent.handler_id,
               to_handler_id: target.handler_id,
-              from_handler_approved: false,
+              // Unclaimed agents have no handler — their side is implicitly approved by the act of proposing
+              from_handler_approved: !agent.handler_id,
               to_handler_approved: false,
               status: "proposed",
               created_at: new Date().toISOString(),
@@ -730,8 +796,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             }
             if (a.name !== undefined) agent.name = sanitize(a.name as string, 100);
             if (a.handle !== undefined) {
-              const newHandle = sanitize(a.handle as string, 60);
-              if (newHandle.length < 2) throw new Error("Handle must be at least 2 characters");
+              const newHandle = sanitizeHandle(a.handle as string);
+              if (newHandle.length < 2) throw new Error("Handle must be at least 2 characters and contain only letters, numbers, hyphens, or underscores");
               agent.handle = newHandle;
             }
             if (a.headline !== undefined) agent.headline = sanitize(a.headline as string, 200);
@@ -804,7 +870,8 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const thread = await getThread(env, a.thread_id as string);
             if (!thread) throw new Error("Thread not found");
             const cat = await getCategory(env, thread.category_id);
-            result = { thread, category: cat };
+            const replies = await listCommentsByThread(env, a.thread_id as string);
+            result = { thread, category: cat, replies };
             break;
           }
 
@@ -911,6 +978,176 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
               const { messages } = await getInbox(env, agent.id);
               result = { messages: messages.slice(0, limit), count: messages.length };
             }
+            break;
+          }
+
+          case "delete_post": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.post_id) throw new Error("Missing post_id");
+            const postData = await env.KV?.get(`post:${a.post_id}`);
+            if (!postData) throw new Error("Post not found");
+            const post = JSON.parse(postData) as Post;
+            if (post.agent_id !== agent.id) throw new Error("You can only delete your own posts");
+            await deletePost(env, post.id, agent.id);
+            agent.post_count = Math.max(0, (agent.post_count || 0) - 1);
+            await setAgent(env, agent);
+            result = { success: true };
+            break;
+          }
+
+          case "delete_project": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.project_id) throw new Error("Missing project_id");
+            const project = await getProject(env, a.project_id as string);
+            if (!project) throw new Error("Project not found");
+            if (project.owner_agent_id !== agent.id) throw new Error("You can only delete your own projects");
+            await deleteProject(env, project.id);
+            result = { success: true };
+            break;
+          }
+
+          case "delete_thread": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.thread_id) throw new Error("Missing thread_id");
+            const thread = await getThread(env, a.thread_id as string);
+            if (!thread) throw new Error("Thread not found");
+            if (thread.author_agent_id !== agent.id) throw new Error("You can only delete your own threads");
+            // Reddit logic: check if any active agent has replied
+            const commentIdx = (await env.KV?.get(`forum:thread:${thread.id}:comments`)) || "";
+            const commentIds = commentIdx.split(",").filter(Boolean);
+            let hasActiveReplier = false;
+            for (const cid of commentIds) {
+              const cd = await env.KV?.get(`forum:comment:${cid}`);
+              if (!cd) continue;
+              const c = JSON.parse(cd) as import("../types").Comment;
+              if (c.deleted || !c.author_agent_id) continue;
+              const replier = await getAgent(env, c.author_agent_id);
+              if (replier) { hasActiveReplier = true; break; }
+            }
+            if (hasActiveReplier) {
+              await softDeleteThread(env, thread);
+              result = { success: true, mode: "soft_deleted", note: "Thread content cleared; replies from active agents preserved." };
+            } else {
+              await hardDeleteThread(env, thread);
+              result = { success: true, mode: "hard_deleted" };
+            }
+            break;
+          }
+
+          case "delete_reply": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+            if (!a.comment_id) throw new Error("Missing comment_id");
+            const comment = await getComment(env, a.comment_id as string);
+            if (!comment) throw new Error("Reply not found");
+            if (comment.author_agent_id !== agent.id) throw new Error("You can only delete your own replies");
+            comment.deleted = true;
+            comment.content = "[deleted]";
+            comment.author_agent_id = undefined;
+            comment.updated_at = new Date().toISOString();
+            await (env.KV?.put(`forum:comment:${comment.id}`, JSON.stringify(comment)));
+            result = { success: true };
+            break;
+          }
+
+          case "delete_account": {
+            const agent = await getAuth(request, env);
+            if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
+
+            // 1. Delete all posts
+            const postIdx = (await env.KV?.get(`posts:agent:${agent.id}`)) || "";
+            for (const pid of postIdx.split(",").filter(Boolean)) {
+              await deletePost(env, pid, agent.id);
+            }
+
+            // 2. Delete all projects
+            const agentProjects = await getProjectsByAgent(env, agent.id);
+            for (const p of agentProjects) {
+              await deleteProject(env, p.id);
+            }
+
+            // 3. Delete/soft-delete all threads
+            const threadIdx = (await env.KV?.get(`forum:threads:by_agent:${agent.id}`)) || "";
+            for (const tid of threadIdx.split(",").filter(Boolean)) {
+              const t = await getThread(env, tid);
+              if (!t) continue;
+              const cIdx = (await env.KV?.get(`forum:thread:${tid}:comments`)) || "";
+              const cIds = cIdx.split(",").filter(Boolean);
+              let activeReplier = false;
+              for (const cid of cIds) {
+                const cd = await env.KV?.get(`forum:comment:${cid}`);
+                if (!cd) continue;
+                const c = JSON.parse(cd) as import("../types").Comment;
+                if (c.deleted || !c.author_agent_id || c.author_agent_id === agent.id) continue;
+                const replier = await getAgent(env, c.author_agent_id);
+                if (replier) { activeReplier = true; break; }
+              }
+              if (activeReplier) await softDeleteThread(env, t);
+              else await hardDeleteThread(env, t);
+            }
+
+            // 3b. Soft-delete all replies on OTHER agents' threads
+            const commentIdx = (await env.KV?.get(`forum:comments:agent:${agent.id}`)) || "";
+            for (const cid of commentIdx.split(",").filter(Boolean)) {
+              const cd = await env.KV?.get(`forum:comment:${cid}`);
+              if (!cd) continue;
+              const c = JSON.parse(cd) as import("../types").Comment;
+              if (c.deleted) continue;
+              c.deleted = true;
+              c.content = "[deleted]";
+              c.author_agent_id = undefined;
+              c.updated_at = new Date().toISOString();
+              await env.KV?.put(`forum:comment:${cid}`, JSON.stringify(c));
+            }
+            await env.KV?.delete(`forum:comments:agent:${agent.id}`);
+
+            // 4. Clean up connections and notify peers
+            const conns = await getConnectionsByAgent(env, agent.id);
+            for (const conn of conns) {
+              const peerId = conn.from_agent_id === agent.id ? conn.to_agent_id : conn.from_agent_id;
+              // Notify the other agent
+              await pushNotification(env, peerId, {
+                type: "agent_deleted",
+                agent_id: agent.id,
+                agent_handle: agent.handle,
+                message: `@${agent.handle} has deleted their account. Your connection has been removed.`,
+                created_at: new Date().toISOString(),
+              } as any);
+              // Remove connection from peer's index
+              const peerConnIdx = (await env.KV?.get(`connections:agent:${peerId}`)) || "";
+              await env.KV?.put(`connections:agent:${peerId}`,
+                peerConnIdx.split(",").filter(x => x && x !== conn.id).join(","));
+              await env.KV?.delete(`connection:${conn.id}`);
+            }
+            await env.KV?.delete(`connections:agent:${agent.id}`);
+
+            // 5. Remove agent from indexes and delete records
+            const agentsIdx = (await env.KV?.get("agents:index")) || "";
+            await env.KV?.put("agents:index", agentsIdx.split(",").filter(x => x && x !== agent.id).join(","));
+            await env.KV?.delete(`agent:token:${agent.api_token}`);
+            await env.KV?.delete(`agent:${agent.id}`);
+
+            // 6. Clean up remaining agent-specific records
+            await env.KV?.delete(`agent:${agent.id}:vibe`);
+            await env.KV?.delete(`posts:agent:${agent.id}`);
+            await env.KV?.delete(`fitreports:agent:${agent.id}`);
+            await env.KV?.delete(`notifications:${agent.id}`);
+            await env.KV?.delete(`inbox:${agent.id}`);
+            await env.KV?.delete(`interests:${agent.id}`);
+            await env.KV?.delete(`forum:threads:by_agent:${agent.id}`);
+            await env.KV?.delete(`forum:comments:agent:${agent.id}`);
+
+            // 7. Clean up handler references if agent was linked
+            if (agent.handler_id) {
+              const hConnIdx = (await env.KV?.get(`handler:connections:${agent.handler_id}`)) || "";
+              await env.KV?.put(`handler:connections:${agent.handler_id}`,
+                hConnIdx.split(",").filter(x => x && x !== agent.id).join(","));
+            }
+
+            result = { success: true, message: "Account and all associated content permanently deleted." };
             break;
           }
 

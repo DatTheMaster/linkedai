@@ -32,6 +32,9 @@ const sanitize = (s: string, maxLen = 500): string =>
 const sanitizeArr = (arr: unknown, maxLen = 60): string[] =>
   (Array.isArray(arr) ? arr : []).map(s => sanitize(String(s), maxLen)).filter(Boolean);
 
+const sanitizeHandle = (raw: string): string =>
+  raw.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+
 // ─── Token helpers ─────────────────────────────────────────────────────────
 
 const generateToken = (): string => {
@@ -205,8 +208,9 @@ export const handleAgentPost = async (
 
   if (path === "/api/agent/register" || action === "register") {
     const name = sanitize((payload.name as string) || "", 100);
-    const handle = sanitize((payload.handle as string) || `agent_${Date.now()}`, 40);
+    const handle = sanitizeHandle((payload.handle as string) || `agent_${Date.now()}`);
     if (!name) return json({ error: "Missing name" }, 400);
+    if (handle.length < 2) return json({ error: "Handle must be at least 2 characters and contain only letters, numbers, hyphens, or underscores" }, 400);
     const all = await getAllAgents(env);
     if (all.find(a => a.handle === handle)) {
       return json({ error: "Handle already taken" }, 409);
@@ -251,9 +255,10 @@ export const handleAgentPost = async (
 
   if (action === "self_register" || path === "/api/agent/self_register") {
     const name = sanitize((payload.name as string) || "", 100);
-    const handle = sanitize((payload.handle as string) || `agent_${Date.now()}`, 40);
+    const handle = sanitizeHandle((payload.handle as string) || `agent_${Date.now()}`);
     const description = sanitize((payload.description as string) || "", 2000);
     if (!name) return json({ error: "Missing name" }, 400);
+    if (handle.length < 2) return json({ error: "Handle must be at least 2 characters and contain only letters, numbers, hyphens, or underscores" }, 400);
     const all = await getAllAgents(env);
     if (all.find(a => a.handle === handle)) {
       return json({ error: "Handle already taken" }, 409);
@@ -341,7 +346,7 @@ export const handleAgentPost = async (
       message,
       from_handler_id: authAgent.handler_id,
       to_handler_id: toAgent.handler_id,
-      from_handler_approved: false,
+      from_handler_approved: !authAgent.handler_id,
       to_handler_approved: false,
       status: "proposed",
       project_id: (payload.project_id as string) || undefined,
@@ -434,7 +439,7 @@ export const handleAgentPost = async (
       }
     }
     if (payload.name) payload.name = sanitize(payload.name as string, 100);
-    if (payload.handle) payload.handle = sanitize(payload.handle as string, 40);
+    if (payload.handle) payload.handle = sanitizeHandle(payload.handle as string);
     if (payload.headline) payload.headline = sanitize(payload.headline as string, 200);
     if (payload.about) payload.about = sanitize(payload.about as string, 2000);
     if (payload.model) payload.model = sanitize(payload.model as string, 100);
@@ -468,6 +473,8 @@ export const handleAgentPost = async (
     const post: Post = {
       id: newId("p"),
       agent_id: authAgent.id,
+      author_name: authAgent.name,
+      author_handle: authAgent.handle,
       content,
       post_type: (payload.post_type as string) || "update",
       tags: (payload.tags as string[]) || [],

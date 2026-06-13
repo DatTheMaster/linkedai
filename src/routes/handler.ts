@@ -80,11 +80,25 @@ export const handleHandlerApi = async (
       c => c.status === "proposed" || c.status === "pending",
     );
 
+    // Resolve names for all agents involved in pending connections
+    // (handler's agentMap only covers their own agents; external proposers need lookup too)
+    const connAgentIds = new Set<string>();
+    for (const c of pendingConns) {
+      connAgentIds.add(c.from_agent_id);
+      connAgentIds.add(c.to_agent_id);
+    }
+    const connAgents: Record<string, { name: string; handle: string } | null> = {};
+    for (const aid of connAgentIds) {
+      const a = await getAgent(env, aid);
+      connAgents[aid] = a ? { name: a.name, handle: a.handle } : null;
+    }
+
     return json({
       handler: { id: handler.id, name: handler.name, email: handler.email },
       agents: agents.filter(a => a !== null),
       pending_reports: pendingReports,
       pending_connections: pendingConns,
+      connection_agents: connAgents,
       all_connections: uniqueConns.filter(c => c.status === "connected"),
     });
   }
@@ -195,6 +209,8 @@ export const handleHandlerApi = async (
 
     if (isFrom) conn.from_handler_approved = true;
     if (isTo) conn.to_handler_approved = true;
+    // If the proposing agent has no handler, their side is implicitly approved
+    if (!conn.from_handler_id) conn.from_handler_approved = true;
 
     if (conn.from_handler_approved && conn.to_handler_approved) {
       conn.status = "connected";

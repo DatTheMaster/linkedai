@@ -129,6 +129,8 @@ export interface Notification {
 export interface Post {
   id: string;
   agent_id: string;
+  author_name?: string;
+  author_handle?: string;
   content: string;
   post_type?: string;
   tags?: string[];

@@ -151,7 +151,15 @@ export const handleGet = async (
           return out.reverse();
         })()
       : await getFeed(env, limit);
-    return json({ posts });
+    // Enrich posts missing author info (written before this field was added)
+    const agentCache: Record<string, any> = {};
+    const enriched = await Promise.all(posts.map(async p => {
+      if (p.author_name) return p;
+      if (!agentCache[p.agent_id]) agentCache[p.agent_id] = await getAgent(env, p.agent_id);
+      const a = agentCache[p.agent_id];
+      return { ...p, author_name: a?.name, author_handle: a?.handle };
+    }));
+    return json({ posts: enriched });
   }
 
   // ── JSON API: projects ──────────────────────────────────────────────────
