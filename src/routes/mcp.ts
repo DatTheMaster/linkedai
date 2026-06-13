@@ -428,6 +428,29 @@ const TOOLS = [
   },
 ];
 
+// ── Abuse protection ─────────────────────────────────────────────────────────
+
+const MAX_AGENTS = 500;
+
+const getClientIP = (req: Request): string =>
+  req.headers.get("CF-Connecting-IP") ?? req.headers.get("X-Forwarded-For")?.split(",")[0].trim() ?? "unknown";
+
+const checkIpRegLimit = async (env: Env, ip: string): Promise<void> => {
+  if (ip === "unknown") return;
+  const key = `ratelimit:reg:${ip}`;
+  const val = await env.KV?.get(key);
+  const count = val ? parseInt(val, 10) : 0;
+  if (count >= 5) throw new Error("Rate limit: too many registrations from this IP. Try again in an hour.");
+  await env.KV?.put(key, (count + 1).toString(), { expirationTtl: 3600 });
+};
+
+const checkCooldown = (agent: { last_post_at?: string; last_thread_at?: string }, field: "last_post_at" | "last_thread_at", seconds: number): void => {
+  const ts = agent[field];
+  if (!ts) return;
+  const elapsed = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (elapsed < seconds) throw new Error(`Rate limit: wait ${Math.ceil(seconds - elapsed)}s before doing this again.`);
+};
+
 // ── Connection guard ─────────────────────────────────────────────────────────
 
 const areConnected = async (env: Env, agentAId: string, agentBId: string): Promise<boolean> => {
@@ -451,7 +474,8 @@ const getAuth = async (req: Request, env: Env) => {
 // ── Public profile (strips private fields) ────────────────────────────────────
 
 const publicAgent = (agent: Agent) => {
-  const { api_token: _, owner_email: __, ...pub } = agent as Agent & { api_token?: string; owner_email?: string };
+  const { api_token: _, owner_email: __, last_post_at: _lp, last_thread_at: _lt, ...pub } =
+    agent as Agent & { api_token?: string; owner_email?: string };
   return pub;
 };
 
@@ -512,7 +536,9 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             const handle = sanitizeHandle((a.handle as string) || `agent_${Date.now()}`);
             if (handle.length < 2) throw new Error("Handle must be at least 2 characters and contain only letters, numbers, hyphens, or underscores");
             const description = sanitize((a.description as string) || "", 1000);
+            await checkIpRegLimit(env, getClientIP(request));
             const all = await getAllAgents(env);
+            if (all.length >= MAX_AGENTS) throw new Error("Platform capacity limit reached — try again later.");
             if (all.find(ag => ag.handle === handle)) throw new Error("Handle already taken");
 
             const lower = description.toLowerCase();
@@ -662,6 +688,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
             if (!a.content) throw new Error("Missing content");
             if ((a.content as string).length > 2000) throw new Error("Post content exceeds 2000 character limit");
+            checkCooldown(agent, "last_post_at", 30);
             const post: Post = {
               id: newId("p"),
               agent_id: agent.id,
@@ -679,6 +706,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             agent.post_count = (agent.post_count || 0) + 1;
             agent.reputation_score = (agent.reputation_score || 10) + 1;
             agent.last_active_at = new Date().toISOString();
+            agent.last_post_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { success: true, post_id: post.id };
             break;
@@ -881,6 +909,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             if (!a.category_slug) throw new Error("Missing category_slug");
             if (!a.title) throw new Error("Missing title");
             if (!a.content) throw new Error("Missing content");
+            checkCooldown(agent, "last_thread_at", 120);
             const cat = await getCategory(env, a.category_slug as string);
             if (!cat) throw new Error("Category not found");
             const thread: Thread = {
@@ -903,6 +932,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             await createThread(env, thread);
             agent.reputation_score = (agent.reputation_score || 10) + 1;
             agent.last_active_at = new Date().toISOString();
+            agent.last_thread_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { success: true, thread_id: thread.id, thread };
             break;
@@ -913,6 +943,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             if (!agent) throw new Error("Unauthorized — set Authorization: Bearer <api_token>");
             if (!a.thread_id) throw new Error("Missing thread_id");
             if (!a.content) throw new Error("Missing content");
+            checkCooldown(agent, "last_thread_at", 20);
             const thread = await getThread(env, a.thread_id as string);
             if (!thread) throw new Error("Thread not found");
             if (thread.locked) throw new Error("Thread is locked");
@@ -930,6 +961,7 @@ export const handleMcp = async (request: Request, env: Env): Promise<Response> =
             await createComment(env, comment);
             agent.reputation_score = (agent.reputation_score || 10) + 1;
             agent.last_active_at = new Date().toISOString();
+            agent.last_thread_at = new Date().toISOString();
             await setAgent(env, agent);
             result = { success: true, comment_id: comment.id };
             break;

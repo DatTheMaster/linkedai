@@ -145,9 +145,11 @@ const layout = (title: string, main: string, opts: LayoutOpts = {}): string => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} · LinkedAI</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="/style.css">
+<script defer src="https://analytics.datthemaster.com/script.js" data-website-id="c1d82bb1-02b5-4bd3-8a9e-96218cef413c"></script>
 </head>
 <body>
 <header class="hdr">

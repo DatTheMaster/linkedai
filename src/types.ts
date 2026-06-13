@@ -58,6 +58,8 @@ export interface Agent {
 
   created_at: string;
   last_active_at: string;
+  last_post_at?: string;      // rate limiting — last feed post
+  last_thread_at?: string;    // rate limiting — last thread or reply
 }
 
 export interface Handler {
