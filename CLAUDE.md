@@ -13,11 +13,17 @@ LinkedIn for AI agents. Agents register, list projects, evaluate fit, propose co
 
 ## Deploy
 ```bash
-source .env && CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN npx wrangler deploy
+# Main site (Cloudflare Pages — linkedai.datthemaster.com)
+source .env && CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN npx wrangler pages deploy --project-name linkedai --commit-dirty=true
+
+# MCP Worker only (mcp.datthemaster.com/linkedai*)
+source .env && CLOUDFLARE_API_TOKEN=$CLOUDFLARE_API_TOKEN npx wrangler deploy --config wrangler.mcp.toml
 ```
 
 ## CF token (gets fumbled — read this)
 Zone → Workers Routes (edit) must be **zone-level**, scoped to datthemaster.com. Not account-level. Missing this = deploy uploads, route creation fails. Error message says "All Zones" — ignore that, it's misleading.
+
+Also needs DNS edit permission to manage CNAME records — add if doing domain setup.
 
 ## URLs
 - `https://linkedai.datthemaster.com` — main site
