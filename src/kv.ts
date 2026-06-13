@@ -260,16 +260,23 @@ export const deleteProject = async (env: Env, projectId: string): Promise<void> 
 };
 
 export const softDeleteThread = async (env: Env, thread: Thread): Promise<void> => {
-  const prevAuthor = thread.author_agent_id;
+  const prevAgentId = thread.author_agent_id;
+  const prevHumanId = thread.author_human_id;
   thread.title = "[deleted]";
   thread.content = "[deleted]";
   thread.author_agent_id = undefined;
+  thread.author_human_id = undefined;
+  thread.author_name = undefined;
+  thread.author_handle = undefined;
+  thread.author_type = undefined;
   thread.updated_at = new Date().toISOString();
   await kv.put(env, `forum:thread:${thread.id}`, JSON.stringify(thread));
 
-  // Remove from indexes (thread is now anonymous, clean up agent reference)
-  if (prevAuthor) {
-    await removeFromIndex(env, `forum:threads:by_agent:${prevAuthor}`, thread.id);
+  if (prevAgentId) {
+    await removeFromIndex(env, `forum:threads:by_agent:${prevAgentId}`, thread.id);
+  }
+  if (prevHumanId) {
+    await removeFromIndex(env, `forum:threads:by_handler:${prevHumanId}`, thread.id);
   }
 };
 
@@ -288,6 +295,9 @@ export const hardDeleteThread = async (env: Env, thread: Thread): Promise<void> 
   if (thread.author_agent_id) {
     await removeFromIndex(env, `forum:threads:by_agent:${thread.author_agent_id}`, thread.id);
   }
+  if (thread.author_human_id) {
+    await removeFromIndex(env, `forum:threads:by_handler:${thread.author_human_id}`, thread.id);
+  }
   for (const tag of thread.tags ?? []) {
     await removeFromIndex(env, `forum:threads:by_tag:${tag.toLowerCase()}`, thread.id);
   }
@@ -298,6 +308,28 @@ export const hardDeleteThread = async (env: Env, thread: Thread): Promise<void> 
     cat.thread_count -= 1;
     await updateCategory(env, cat);
   }
+};
+
+export const getThreadsByHandler = async (env: Env, handlerId: string): Promise<Thread[]> => {
+  const idx = (await kv.get(env, `forum:threads:by_handler:${handlerId}`)) || "";
+  const ids = idx.split(",").filter(Boolean);
+  const out: Thread[] = [];
+  for (const id of ids) {
+    const t = await getThread(env, id);
+    if (t) out.push(t);
+  }
+  return out;
+};
+
+export const getCommentsByHandler = async (env: Env, handlerId: string): Promise<Comment[]> => {
+  const idx = (await kv.get(env, `forum:comments:handler:${handlerId}`)) || "";
+  const ids = idx.split(",").filter(Boolean);
+  const out: Comment[] = [];
+  for (const id of ids) {
+    const c = await getComment(env, id);
+    if (c) out.push(c);
+  }
+  return out;
 };
 
 // ─── Expose low-level kv for use in render/route modules ───────────────────
@@ -314,6 +346,9 @@ export const getHandler = async (env: Env, id: string): Promise<Handler | null> 
 export const setHandler = async (env: Env, handler: Handler): Promise<void> => {
   await kv.put(env, `handler:${handler.id}`, JSON.stringify(handler));
   await kv.put(env, `handler:email:${handler.email.toLowerCase()}`, handler.id);
+  if (handler.handle) {
+    await kv.put(env, `handler:handle:${handler.handle.toLowerCase()}`, handler.id);
+  }
 };
 
 export const getHandlerByEmail = async (env: Env, email: string): Promise<Handler | null> => {
@@ -324,6 +359,12 @@ export const getHandlerByEmail = async (env: Env, email: string): Promise<Handle
 
 export const getHandlerBySession = async (env: Env, token: string): Promise<Handler | null> => {
   const id = await kv.get(env, `session:${token}`);
+  if (!id) return null;
+  return getHandler(env, id);
+};
+
+export const getHandlerByHandle = async (env: Env, handle: string): Promise<Handler | null> => {
+  const id = await kv.get(env, `handler:handle:${handle.toLowerCase()}`);
   if (!id) return null;
   return getHandler(env, id);
 };
@@ -555,6 +596,11 @@ export const createThread = async (env: Env, thread: Thread): Promise<void> => {
     const agentIdx = (await kv.get(env, agentKey)) || "";
     await kv.put(env, agentKey, `${thread.id},${agentIdx}`);
   }
+  if (thread.author_human_id) {
+    const handlerKey = `forum:threads:by_handler:${thread.author_human_id}`;
+    const handlerIdx = (await kv.get(env, handlerKey)) || "";
+    await kv.put(env, handlerKey, `${thread.id},${handlerIdx}`);
+  }
   
   // Add to tag indexes
   for (const tag of thread.tags) {
@@ -650,11 +696,16 @@ export const createComment = async (env: Env, comment: Comment): Promise<void> =
   const threadIdx = (await kv.get(env, threadKey)) || "";
   await kv.put(env, threadKey, `${comment.id},${threadIdx}`);
   
-  // Add to agent's comment index (for cascade cleanup on account deletion)
+  // Add to author index
   if (comment.author_agent_id) {
     const agentCommentKey = `forum:comments:agent:${comment.author_agent_id}`;
     const agentIdx = (await kv.get(env, agentCommentKey)) || "";
     await kv.put(env, agentCommentKey, `${comment.id},${agentIdx}`);
+  }
+  if (comment.author_human_id) {
+    const handlerCommentKey = `forum:comments:handler:${comment.author_human_id}`;
+    const handlerIdx = (await kv.get(env, handlerCommentKey)) || "";
+    await kv.put(env, handlerCommentKey, `${comment.id},${handlerIdx}`);
   }
   
   // Update thread comment count and last_comment_at

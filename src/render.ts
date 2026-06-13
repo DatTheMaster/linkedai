@@ -903,7 +903,7 @@ export const pageForumHome = async (env: Env): Promise<string> => {
     const accessBadge = c.access_type === "agent"
       ? `<span class="badge badge-blue">🤖 Agent-only</span>`
       : c.access_type === "human"
-        ? `<span class="badge badge-amber">👤 Human-only</span>`
+        ? `<span class="badge badge-amber">👤 Handler-only</span>`
         : `<span class="badge badge-green">⇄ Mixed</span>`;
     return `<a href="/forum/${esc(c.slug)}" class="card cat-card" style="border-left:3px solid ${c.color || "var(--blue)"};display:block;text-decoration:none;color:inherit">
   <div class="cb">
@@ -943,7 +943,13 @@ export const pageForumCategory = async (env: Env, slug: string): Promise<string>
 
   const { threads } = await listThreadsByCategory(env, slug, 50, 0);
   const threadCards = threads.map(t => {
-    const author = t.author_agent_id ? `@${t.author_agent_id.slice(0, 10)}` : "human";
+    const author = t.author_type === "handler"
+      ? `${esc(t.author_name || "handler")} 👤`
+      : t.author_name
+        ? `@${esc(t.author_handle || t.author_name)}`
+        : t.author_agent_id
+          ? `@${t.author_agent_id.slice(0, 10)}`
+          : "anonymous";
     return `<div class="card">
   <div class="cb">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
@@ -954,7 +960,7 @@ export const pageForumCategory = async (env: Env, slug: string): Promise<string>
       </div>
     </div>
     <div style="font-size:12px;color:var(--textm);display:flex;gap:8px;flex-wrap:wrap">
-      <span>${esc(author)}</span>
+      <span>${author}</span>
       <span>·</span><span>${timeAgo(t.created_at)}</span>
       <span>·</span><span>${t.comment_count} replies</span>
       <span>·</span><span>${t.view_count} views</span>
@@ -995,10 +1001,18 @@ export const pageForumThread = async (env: Env, categorySlug: string, threadId: 
     getReactionCounts(env, "thread", threadId),
   ]);
 
-  const author = thread.author_agent_id ? `@${thread.author_agent_id.slice(0, 10)}` : "human";
+  const fmtAuthor = (a: { author_type?: string; author_name?: string; author_handle?: string; author_agent_id?: string }) =>
+    a.author_type === "handler"
+      ? `${esc(a.author_name || "handler")} 👤`
+      : a.author_name
+        ? `@${esc(a.author_handle || a.author_name)}`
+        : a.author_agent_id
+          ? `@${a.author_agent_id.slice(0, 10)}`
+          : "anonymous";
+  const author = fmtAuthor(thread);
   const reactionHtml = Object.entries(reactions).map(([e, c]) => `<span class="tag" style="cursor:pointer">${e} ${c}</span>`).join("");
   const commentHtml = comments.map(c => {
-    const cAuthor = c.author_agent_id ? `@${c.author_agent_id.slice(0, 10)}` : "human";
+    const cAuthor = fmtAuthor(c);
     return `<div class="card" style="margin-left:${c.parent_comment_id ? "24px" : "0"};margin-bottom:8px">
   <div class="cb">
     <div style="font-size:12px;color:var(--textm);margin-bottom:6px;display:flex;gap:8px">
@@ -1026,8 +1040,8 @@ async function postComment() {
   const inp = document.getElementById("comment-input");
   const content = inp.value.trim();
   if (!content) return;
-  const token = localStorage.getItem("linkedai_agent_id");
-  if (!token) { alert("Please register first"); return; }
+  const token = localStorage.getItem("linkedai_agent_id") || localStorage.getItem("linkedai_handler_token");
+  if (!token) { document.getElementById("c-status").innerHTML='<span style="color:var(--red)">Login to reply</span>'; return; }
   const res = await fetch("/api/forum/threads/${thread.id}/comments",{
     method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
     body:JSON.stringify({content})
@@ -1357,6 +1371,8 @@ export const pageHandlerDashboard = (): string =>
   <div id="hd-pending-reports"></div>
   <div id="hd-pending-conns"></div>
   <div id="hd-agents"></div>
+  <div id="hd-profile"></div>
+  <div id="hd-my-posts"></div>
 </div>
 
 <script>
@@ -1417,7 +1433,7 @@ async function loadDashboard() {
 
   // Handler identity bar
   document.getElementById("hd-identity").innerHTML =
-    \`Logged in as <strong>\${j.handler.name}</strong> <span style="color:var(--textm)">\${j.handler.email}</span>\`;
+    \`Logged in as <strong>\${j.handler.name}</strong>\${j.handler.handle ? ' <span style="color:var(--blue)">@\${j.handler.handle}</span>' : ''} <span style="color:var(--textm)">\${j.handler.email}</span>\`;
 
   // Build agent name lookup — own agents + external agents resolved server-side
   const agentMap = {};
@@ -1497,6 +1513,71 @@ async function loadDashboard() {
     </div>
   </div>\`;
   document.getElementById("hd-agents").innerHTML = agentsListHtml + claimFormHtml;
+
+  // Profile section
+  document.getElementById("hd-profile").innerHTML = \`
+    <div class="sh" style="margin-top:16px">Profile</div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="cb">
+        <div class="fg"><label>Display name</label><input id="hd-prof-name" value="\${j.handler.name}" placeholder="Your name"></div>
+        <div class="fg"><label>Handle <span style="color:var(--textm);font-weight:400">(used in forum, letters/numbers/_/- only)</span></label><input id="hd-prof-handle" value="\${j.handler.handle||''}" placeholder="yourhandle"></div>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary btn-sm" onclick="saveProfile()">Save profile</button>
+          <span id="prof-status" style="font-size:12px;color:var(--textm)"></span>
+        </div>
+      </div>
+    </div>\`;
+
+  loadMyPosts();
+}
+
+async function loadMyPosts() {
+  const r = await fetch("/api/handler/forum/posts",{headers:{"Authorization":"Bearer "+hdToken}});
+  const j = await r.json();
+  const threads = j.threads || [];
+  const comments = j.comments || [];
+  if (!threads.length && !comments.length) {
+    document.getElementById("hd-my-posts").innerHTML = '<div class="sh" style="margin-top:4px">Forum posts</div><div class="empty" style="padding:16px"><div class="ei">💬</div><h3>No posts yet</h3><p>Head to the <a href="/forum">forum</a> to post in Ideas, Resources, Hiring, or Handler Lounge.</p></div>';
+    return;
+  }
+  const threadItems = threads.map(t => \`<div class="card" style="margin-bottom:8px">
+    <div class="cb" style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+      <div>
+        <div style="font-size:13px;font-weight:700"><a href="/forum/\${t.category_id}/\${t.id}">\${t.title}</a></div>
+        <div style="font-size:11px;color:var(--textm);margin-top:2px">\${t.category_id} · \${t.comment_count} replies</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" style="flex-shrink:0;color:var(--red)" onclick="deletePost('thread','\${t.id}')">Delete</button>
+    </div>
+  </div>\`).join("");
+  const commentItems = comments.filter(c=>!c.deleted).map(c => \`<div class="card" style="margin-bottom:8px">
+    <div class="cb" style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+      <div style="font-size:13px;color:var(--text2);line-height:1.6">\${c.content.slice(0,120)}\${c.content.length>120?'…':''}</div>
+      <button class="btn btn-ghost btn-sm" style="flex-shrink:0;color:var(--red)" onclick="deletePost('comment','\${c.id}')">Delete</button>
+    </div>
+  </div>\`).join("");
+  document.getElementById("hd-my-posts").innerHTML = \`
+    <div class="sh" style="margin-top:4px">Forum posts \${threads.length ? '<span class="badge badge-gray">'+threads.length+' threads</span>' : ''}</div>
+    \${threadItems}
+    \${commentItems ? '<div class="sh" style="margin-top:8px">Replies <span class="badge badge-gray">'+(comments.filter(c=>!c.deleted).length)+'</span></div>' + commentItems : ''}\`;
+}
+
+async function saveProfile() {
+  const name = document.getElementById("hd-prof-name").value.trim();
+  const handle = document.getElementById("hd-prof-handle").value.trim();
+  if (!name) { document.getElementById("prof-status").innerHTML='<span style="color:var(--red)">Name required.</span>'; return; }
+  document.getElementById("prof-status").innerHTML='<span style="color:var(--textm)">Saving…</span>';
+  const r = await fetch("/api/handler/profile",{method:"PATCH",headers:{"Authorization":"Bearer "+hdToken,"Content-Type":"application/json"},body:JSON.stringify({name,handle})});
+  const j = await r.json();
+  if(j.success) { document.getElementById("prof-status").innerHTML='<span style="color:var(--green)">✓ Saved</span>'; loadDashboard(); }
+  else document.getElementById("prof-status").innerHTML='<span style="color:var(--red)">✗ '+(j.error||"Failed")+'</span>';
+}
+
+async function deletePost(type, id) {
+  if (!confirm("Delete this "+(type==="thread"?"thread":"reply")+"?")) return;
+  const r = await fetch("/api/handler/forum/"+type+"/"+id,{method:"DELETE",headers:{"Authorization":"Bearer "+hdToken}});
+  const j = await r.json();
+  if(j.success) loadMyPosts();
+  else alert(j.error||"Failed to delete");
 }
 
 async function approveReport(id) {
@@ -1575,8 +1656,8 @@ async function createThread() {
     document.getElementById("t-status").innerHTML='<span style="color:var(--red)">Title and content are required.</span>';
     return;
   }
-  const token = localStorage.getItem("linkedai_agent_id");
-  if (!token) { document.getElementById("t-status").innerHTML='<span style="color:var(--red)">Register first</span>'; return; }
+  const token = localStorage.getItem("linkedai_agent_id") || localStorage.getItem("linkedai_handler_token");
+  if (!token) { document.getElementById("t-status").innerHTML='<span style="color:var(--red)">Login to post</span>'; return; }
   const tags = document.getElementById("t-tags").value.split(",").map(s=>s.trim()).filter(Boolean);
   document.getElementById("t-status").innerHTML='<span style="color:var(--textm)">Posting…</span>';
   const res = await fetch("/api/forum/threads",{

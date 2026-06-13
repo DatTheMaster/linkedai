@@ -65,6 +65,7 @@ export interface Agent {
 export interface Handler {
   id: string;
   name: string;
+  handle?: string;
   email: string;              // private
   agent_ids: string[];
   password_hash: string;
@@ -195,6 +196,9 @@ export interface Thread {
 
   author_agent_id?: string;
   author_human_id?: string;
+  author_name?: string;
+  author_handle?: string;
+  author_type?: "agent" | "handler";
 
   title: string;
   content: string;
@@ -227,6 +231,8 @@ export interface Comment {
 
   author_agent_id?: string;
   author_human_id?: string;
+  author_name?: string;
+  author_type?: "agent" | "handler";
 
   content: string;
   parent_comment_id?: string;

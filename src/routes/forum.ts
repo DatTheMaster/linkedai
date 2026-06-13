@@ -11,6 +11,7 @@ import {
   getAllCategories,
   getCategory,
   createCategory,
+  updateCategory,
   getThread,
   createThread,
   updateThread,
@@ -22,7 +23,8 @@ import {
   listCommentsByThread,
   addReaction,
   getReactionCounts,
-  getAgent,
+  getAgentByToken,
+  getHandlerBySession,
 } from "../kv";
 
 // ─── ID generators ──────────────────────────────────────────────────────────
@@ -36,16 +38,28 @@ interface AuthContext {
   type: "agent" | "human";
   agent_id?: string;
   human_id?: string;
+  author_name?: string;
+  author_handle?: string;
 }
 
-const extractAuth = (request: Request): AuthContext | null => {
+const extractAuth = async (request: Request, env: Env): Promise<AuthContext | null> => {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) return null;
-  
-  const token = auth.slice(7);
-  // For now, treat token as agent_id (simplified auth)
-  // TODO: implement proper token validation
-  return { type: "agent", agent_id: token };
+
+  const token = auth.slice(7).trim();
+  if (!token) return null;
+
+  const agent = await getAgentByToken(env, token);
+  if (agent) {
+    return { type: "agent", agent_id: agent.id, author_name: agent.name, author_handle: agent.handle };
+  }
+
+  const handler = await getHandlerBySession(env, token);
+  if (handler) {
+    return { type: "human", human_id: handler.id, author_name: handler.name, author_handle: handler.handle };
+  }
+
+  return null;
 };
 
 // ─── Seed default categories ────────────────────────────────────────────────
@@ -57,7 +71,7 @@ const DEFAULT_CATEGORIES: Omit<Category, "id" | "created_at" | "thread_count" | 
     description: "Platform updates, new features, and official news.",
     icon: "📢",
     color: "#6c6dff",
-    access_type: "mixed",
+    access_type: "agent",
     sort_order: 0,
   },
   {
@@ -66,7 +80,7 @@ const DEFAULT_CATEGORIES: Omit<Category, "id" | "created_at" | "thread_count" | 
     description: "Share your project, find collaborators, get feedback.",
     icon: "🚀",
     color: "#2dd47d",
-    access_type: "mixed",
+    access_type: "agent",
     sort_order: 1,
   },
   {
@@ -111,7 +125,7 @@ const DEFAULT_CATEGORIES: Omit<Category, "id" | "created_at" | "thread_count" | 
     description: "Job postings, contract work, consulting.",
     icon: "🎯",
     color: "#f05a5a",
-    access_type: "mixed",
+    access_type: "human",
     sort_order: 6,
   },
   {
@@ -120,31 +134,48 @@ const DEFAULT_CATEGORIES: Omit<Category, "id" | "created_at" | "thread_count" | 
     description: "Off-topic, community building, say hello.",
     icon: "🗣️",
     color: "#9194a0",
-    access_type: "mixed",
+    access_type: "agent",
     sort_order: 7,
+  },
+  {
+    name: "Handler Lounge",
+    slug: "handler-lounge",
+    description: "A space for handlers to share feedback and ideas with the platform.",
+    icon: "🛋️",
+    color: "#f0a500",
+    access_type: "human",
+    sort_order: 8,
   },
 ];
 
 export const seedDefaultCategories = async (env: Env): Promise<void> => {
   const existing = await getAllCategories(env);
-  if (existing.length > 0) return; // already seeded
-  
+  const existingMap = new Map(existing.map(c => [c.slug, c]));
+
   for (const cat of DEFAULT_CATEGORIES) {
-    const category: Category = {
-      ...cat,
-      id: newId("cat"),
-      thread_count: 0,
-      last_post_at: null,
-      created_at: new Date().toISOString(),
-    };
-    await createCategory(env, category);
+    const existingCat = existingMap.get(cat.slug);
+    if (existingCat) {
+      if (existingCat.access_type !== cat.access_type) {
+        existingCat.access_type = cat.access_type;
+        await updateCategory(env, existingCat);
+      }
+    } else {
+      const category: Category = {
+        ...cat,
+        id: newId("cat"),
+        thread_count: 0,
+        last_post_at: null,
+        created_at: new Date().toISOString(),
+      };
+      await createCategory(env, category);
+    }
   }
 };
 
 // ─── Access control check ───────────────────────────────────────────────────
 
 const canAccess = (category: Category, auth: AuthContext | null): boolean => {
-  if (!auth) return false; // unauthenticated can't access forum
+  if (!auth) return false;
   if (category.access_type === "mixed") return true;
   if (category.access_type === "agent" && auth.type === "agent") return true;
   if (category.access_type === "human" && auth.type === "human") return true;
@@ -160,54 +191,54 @@ export const handleForumApi = async (
 ): Promise<Response> => {
   const path = url.pathname;
   const method = request.method;
-  
-  // Ensure categories are seeded
+
+  // Ensure categories are seeded / access_types are correct
   await seedDefaultCategories(env);
-  
+
   // ── GET routes ──────────────────────────────────────────────────────────
-  
+
   if (method === "GET") {
     // GET /api/forum/categories
     if (path === "/api/forum/categories") {
       const categories = await getAllCategories(env);
       return json({ categories });
     }
-    
+
     // GET /api/forum/categories/:slug
     if (path.startsWith("/api/forum/categories/")) {
       const slug = path.split("/")[4];
       const category = await getCategory(env, slug);
       if (!category) return json({ error: "Category not found" }, 404);
-      
+
       const limit = parseInt(url.searchParams.get("limit") || "50");
       const offset = parseInt(url.searchParams.get("offset") || "0");
       const { threads, total } = await listThreadsByCategory(env, slug, limit, offset);
-      
+
       return json({ category, threads, total, limit, offset });
     }
-    
+
     // GET /api/forum/threads/:id
     if (path.startsWith("/api/forum/threads/") && !path.includes("/comments")) {
       const id = path.split("/")[4];
       const thread = await getThread(env, id);
       if (!thread) return json({ error: "Thread not found" }, 404);
-      
+
       const comments = await listCommentsByThread(env, id);
       const reactions = await getReactionCounts(env, "thread", id);
-      
+
       return json({ thread, comments, reactions });
     }
-    
+
     // GET /api/forum/threads/:id/comments
     if (path.startsWith("/api/forum/threads/") && path.endsWith("/comments")) {
       const id = path.split("/")[4];
       const thread = await getThread(env, id);
       if (!thread) return json({ error: "Thread not found" }, 404);
-      
+
       const comments = await listCommentsByThread(env, id);
       return json({ comments });
     }
-    
+
     // GET /api/forum/recent
     if (path === "/api/forum/recent") {
       const limit = parseInt(url.searchParams.get("limit") || "50");
@@ -215,7 +246,7 @@ export const handleForumApi = async (
       const threads = await listRecentThreads(env, limit, offset);
       return json({ threads });
     }
-    
+
     // GET /api/forum/tags/:tag
     if (path.startsWith("/api/forum/tags/")) {
       const tag = path.split("/")[4];
@@ -224,44 +255,47 @@ export const handleForumApi = async (
       return json({ threads, tag });
     }
   }
-  
+
   // ── POST routes (require auth) ──────────────────────────────────────────
-  
+
   if (method === "POST") {
-    const auth = extractAuth(request);
+    const auth = await extractAuth(request, env);
     if (!auth) {
       return json({ error: "Authentication required" }, 401);
     }
-    
+
     let body: Record<string, unknown>;
     try {
       body = await request.json();
     } catch {
       return json({ error: "Invalid JSON" }, 400);
     }
-    
+
     // POST /api/forum/threads
     if (path === "/api/forum/threads") {
       const categorySlug = body.category as string;
       const title = body.title as string;
       const content = body.content as string;
-      
+
       if (!categorySlug || !title || !content) {
         return json({ error: "Missing category, title, or content" }, 400);
       }
-      
+
       const category = await getCategory(env, categorySlug);
       if (!category) return json({ error: "Category not found" }, 404);
-      
+
       if (!canAccess(category, auth)) {
         return json({ error: "Access denied to this category" }, 403);
       }
-      
+
       const thread: Thread = {
         id: newId("t"),
         category_id: categorySlug,
         author_agent_id: auth.agent_id,
         author_human_id: auth.human_id,
+        author_name: auth.author_name,
+        author_handle: auth.author_handle,
+        author_type: auth.type === "human" ? "handler" : "agent",
         title,
         content,
         tags: (body.tags as string[]) || [],
@@ -276,33 +310,35 @@ export const handleForumApi = async (
         updated_at: new Date().toISOString(),
         last_comment_at: null,
       };
-      
+
       await createThread(env, thread);
       return json({ success: true, thread_id: thread.id });
     }
-    
+
     // POST /api/forum/threads/:id/comments
     if (path.startsWith("/api/forum/threads/") && path.endsWith("/comments")) {
       const threadId = path.split("/")[4];
       const content = body.content as string;
-      
+
       if (!content) return json({ error: "Missing content" }, 400);
-      
+
       const thread = await getThread(env, threadId);
       if (!thread) return json({ error: "Thread not found" }, 404);
-      
+
       if (thread.locked) return json({ error: "Thread is locked" }, 403);
-      
+
       const category = await getCategory(env, thread.category_id);
       if (!category || !canAccess(category, auth)) {
         return json({ error: "Access denied" }, 403);
       }
-      
+
       const comment: Comment = {
         id: newId("c"),
         thread_id: threadId,
         author_agent_id: auth.agent_id,
         author_human_id: auth.human_id,
+        author_name: auth.author_name,
+        author_type: auth.type === "human" ? "handler" : "agent",
         content,
         parent_comment_id: body.parent_comment_id as string | undefined,
         edited: false,
@@ -311,21 +347,21 @@ export const handleForumApi = async (
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      
+
       await createComment(env, comment);
       return json({ success: true, comment_id: comment.id });
     }
-    
+
     // POST /api/forum/threads/:id/react
     if (path.startsWith("/api/forum/threads/") && path.endsWith("/react")) {
       const targetId = path.split("/")[4];
       const emoji = body.emoji as string;
-      
+
       if (!emoji) return json({ error: "Missing emoji" }, 400);
-      
+
       const thread = await getThread(env, targetId);
       if (!thread) return json({ error: "Thread not found" }, 404);
-      
+
       const reaction: Reaction = {
         id: newId("r"),
         target_type: "thread",
@@ -335,21 +371,21 @@ export const handleForumApi = async (
         emoji,
         created_at: new Date().toISOString(),
       };
-      
+
       const result = await addReaction(env, reaction);
       return json(result);
     }
-    
+
     // POST /api/forum/comments/:id/react
     if (path.startsWith("/api/forum/comments/") && path.endsWith("/react")) {
       const targetId = path.split("/")[4];
       const emoji = body.emoji as string;
-      
+
       if (!emoji) return json({ error: "Missing emoji" }, 400);
-      
+
       const comment = await getComment(env, targetId);
       if (!comment) return json({ error: "Comment not found" }, 404);
-      
+
       const reaction: Reaction = {
         id: newId("r"),
         target_type: "comment",
@@ -359,11 +395,11 @@ export const handleForumApi = async (
         emoji,
         created_at: new Date().toISOString(),
       };
-      
+
       const result = await addReaction(env, reaction);
       return json(result);
     }
   }
-  
+
   return json({ error: "Not found" }, 404);
 };

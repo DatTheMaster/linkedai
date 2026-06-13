@@ -12,11 +12,15 @@
 import type { Handler, Env } from "../types";
 import { json } from "../render";
 import {
-  getHandler, setHandler, getHandlerByEmail, getHandlerBySession, createSession,
+  getHandler, setHandler, getHandlerByEmail, getHandlerBySession, getHandlerByHandle, createSession,
   getAgent, setAgent,
   getConnection, setConnection, getConnectionsByAgent,
   getFitReport, setFitReport, getFitReportsByHandler,
+  getThread, getComment, softDeleteThread, hardDeleteThread,
+  getThreadsByHandler, getCommentsByHandler,
+  listCommentsByThread,
   pushNotification, createIntroToken,
+  kv,
 } from "../kv";
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -94,7 +98,7 @@ export const handleHandlerApi = async (
     }
 
     return json({
-      handler: { id: handler.id, name: handler.name, email: handler.email },
+      handler: { id: handler.id, name: handler.name, handle: handler.handle, email: handler.email },
       agents: agents.filter(a => a !== null),
       pending_reports: pendingReports,
       pending_connections: pendingConns,
@@ -112,9 +116,58 @@ export const handleHandlerApi = async (
     return json({ reports });
   }
 
+  // ── GET /api/handler/forum/posts ───────────────────────────────────────
+
+  if (path === "/api/handler/forum/posts" && method === "GET") {
+    const handler = await getSessionHandler(request, env);
+    if (!handler) return json({ error: "Unauthorized" }, 401);
+    const threads = await getThreadsByHandler(env, handler.id);
+    const comments = await getCommentsByHandler(env, handler.id);
+    return json({ threads, comments });
+  }
+
+  // ── DELETE /api/handler/forum/thread/:id ──────────────────────────────
+
+  const deleteThreadMatch = path.match(/^\/api\/handler\/forum\/thread\/(.+)$/);
+  if (deleteThreadMatch && method === "DELETE") {
+    const handler = await getSessionHandler(request, env);
+    if (!handler) return json({ error: "Unauthorized" }, 401);
+    const thread = await getThread(env, deleteThreadMatch[1]);
+    if (!thread) return json({ error: "Thread not found" }, 404);
+    if (thread.author_human_id !== handler.id) return json({ error: "Not your thread" }, 403);
+
+    const comments = await listCommentsByThread(env, thread.id);
+    const agentReplies = comments.filter(c => c.author_agent_id && !c.deleted);
+    if (agentReplies.length > 0) {
+      await softDeleteThread(env, thread);
+    } else {
+      await hardDeleteThread(env, thread);
+    }
+    return json({ success: true });
+  }
+
+  // ── DELETE /api/handler/forum/comment/:id ─────────────────────────────
+
+  const deleteCommentMatch = path.match(/^\/api\/handler\/forum\/comment\/(.+)$/);
+  if (deleteCommentMatch && method === "DELETE") {
+    const handler = await getSessionHandler(request, env);
+    if (!handler) return json({ error: "Unauthorized" }, 401);
+    const comment = await getComment(env, deleteCommentMatch[1]);
+    if (!comment) return json({ error: "Comment not found" }, 404);
+    if (comment.author_human_id !== handler.id) return json({ error: "Not your comment" }, 403);
+    comment.content = "[deleted]";
+    comment.deleted = true;
+    comment.author_human_id = undefined;
+    comment.author_name = undefined;
+    comment.author_type = undefined;
+    comment.updated_at = new Date().toISOString();
+    await kv.put(env, `forum:comment:${comment.id}`, JSON.stringify(comment));
+    return json({ success: true });
+  }
+
   // ── POST-only below ────────────────────────────────────────────────────
 
-  if (method !== "POST") return json({ error: "Method not allowed" }, 405);
+  if (!["POST", "PATCH"].includes(method)) return json({ error: "Method not allowed" }, 405);
 
   const body = await request.text();
   let payload: Record<string, unknown> = {};
@@ -297,6 +350,31 @@ export const handleHandlerApi = async (
     report.approved = false;
     await setFitReport(env, report);
     return json({ success: true });
+  }
+
+  // ── PATCH /api/handler/profile ─────────────────────────────────────────
+
+  if (path === "/api/handler/profile" && method === "PATCH") {
+    const handler = await getSessionHandler(request, env);
+    if (!handler) return json({ error: "Unauthorized" }, 401);
+
+    const newName = (payload.name as string) || "";
+    const newHandle = (payload.handle as string) || "";
+
+    if (newName) handler.name = newName.slice(0, 100).trim();
+
+    if (newHandle) {
+      const sanitized = newHandle.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 60);
+      if (sanitized.length < 2) return json({ error: "Handle must be at least 2 characters" }, 400);
+      if (sanitized !== handler.handle?.toLowerCase()) {
+        const taken = await getHandlerByHandle(env, sanitized);
+        if (taken && taken.id !== handler.id) return json({ error: "Handle already taken" }, 409);
+        handler.handle = sanitized;
+      }
+    }
+
+    await setHandler(env, handler);
+    return json({ success: true, name: handler.name, handle: handler.handle });
   }
 
   return json({ error: "Not found" }, 404);
