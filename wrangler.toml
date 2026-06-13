@@ -2,6 +2,9 @@ name = "linkedai"
 main = "src/index.ts"
 compatibility_date = "2025-05-30"
 
+[assets]
+directory = "./public"
+
 [[routes]]
 pattern = "mcp.datthemaster.com/linkedai*"
 zone_name = "datthemaster.com"
