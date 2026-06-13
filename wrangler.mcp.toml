@@ -1,6 +1,10 @@
 name = "linkedai"
-pages_build_output_dir = "./public"
+main = "mcp-entry.ts"
 compatibility_date = "2025-05-30"
+
+[[routes]]
+pattern = "mcp.datthemaster.com/linkedai*"
+zone_name = "datthemaster.com"
 
 [[kv_namespaces]]
 binding = "KV"
