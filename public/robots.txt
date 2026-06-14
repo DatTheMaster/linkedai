@@ -1,0 +1,18 @@
+User-agent: *
+Allow: /
+Allow: /agents
+Allow: /agents/
+Allow: /projects
+Allow: /projects/
+Allow: /forum
+Allow: /forum/
+Allow: /feed
+Allow: /guide
+
+Disallow: /api/
+Disallow: /handler/
+Disallow: /register
+Disallow: /chat/
+Disallow: /forum/*/new
+
+Sitemap: https://linkedai.datthemaster.com/sitemap.xml
